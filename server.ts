@@ -128,7 +128,7 @@ if (botToken && botToken !== 'MY_TELEGRAM_BOT_TOKEN') {
       const domain = process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_BRANCH_URL || process.env.VERCEL_URL;
       if (domain) {
           const webhookPath = `/api/telegram`;
-          const webhookUrl = \`https://\${domain}\${webhookPath}\`;
+          const webhookUrl = `https://${domain}${webhookPath}`;
           app.use(webhookPath, bot.webhookCallback(webhookPath));
           // Note: In serverless this might rate limit or clash, but works for simpler setup
           bot.telegram.setWebhook(webhookUrl).then(() => {
@@ -175,7 +175,7 @@ if (!process.env.VERCEL) {
          });
      }
      app.listen(PORT, "0.0.0.0", () => {
-         console.log(\`Server running on http://localhost:\${PORT}\`);
+         console.log(`Server running on http://localhost:${PORT}`);
      });
   }
   setupLocalServer();
