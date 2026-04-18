@@ -164,10 +164,20 @@ export function setupBot(app: any) {
       if (domain) {
           const webhookPath = `/api/telegram`;
           const webhookUrl = `https://${domain}${webhookPath}`;
-          app.use(webhookPath, bot.webhookCallback(webhookPath));
+          
+          // Use explicit POST handler — app.use(path, callback) strips the mount path,
+          // which breaks Telegraf's internal path matching in webhookCallback()
+          app.post(webhookPath, (req: any, res: any) => {
+            bot.handleUpdate(req.body, res);
+          });
+          
           bot.telegram.setWebhook(webhookUrl).then(() => {
-              console.log("Vercel Webhook set to", webhookUrl);
-          }).catch(console.error);
+              console.log("✅ Vercel Webhook set to", webhookUrl);
+          }).catch((err: any) => {
+              console.error("❌ Failed to set webhook:", err);
+          });
+      } else {
+          console.error("❌ No Vercel domain found for webhook setup");
       }
   } else {
       bot.launch().catch(err => console.error("Failed to launch bot:", err));
