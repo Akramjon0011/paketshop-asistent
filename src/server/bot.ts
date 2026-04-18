@@ -4,8 +4,15 @@ import path from "path";
 import fs from 'fs';
 import os from 'os';
 import ffmpeg from 'fluent-ffmpeg';
+import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import { fileURLToPath } from 'url';
 import { SYSTEM_INSTRUCTION, searchKnowledgeBase } from './ai.js';
+
+try {
+    ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+} catch (e) {
+    console.error("Failed to initialize ffmpeg on Vercel:", e);
+}
 
 const __filename = fileURLToPath(import.meta.url);
 // the public directory will be relative to project root. We are in src/server, so project root is ../..

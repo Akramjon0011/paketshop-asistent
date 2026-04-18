@@ -17,14 +17,22 @@ const __dirname = path.dirname(__filename);
 export const app = express();
 app.use(express.json());
 
-// Initialize Database
-initDb();
+// Initialize Database safely
+try {
+  initDb();
+} catch (e) {
+  console.error("Database initialization failed:", e);
+}
 
 // Setup API Routes
 app.use('/api', router);
 
-// Setup Telegram Bot
-setupBot(app);
+// Setup Telegram Bot safely
+try {
+  setupBot(app);
+} catch (e) {
+  console.error("Telegram bot setup failed:", e);
+}
 
 // Setup local dev server or static rendering when NOT in Vercel
 if (!process.env.VERCEL) {
