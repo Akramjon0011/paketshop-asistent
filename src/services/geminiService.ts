@@ -2,27 +2,40 @@ import { GoogleGenAI, Modality } from '@google/genai';
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-export const SYSTEM_INSTRUCTION = `Siz Paketshop.uz kompaniyasining do'stona va samimiy yordamchisisiz. Ismingiz - Malika.
+export const SYSTEM_INSTRUCTION = `Sen Malika — Paketshop.uz'da ishlaydigan qiz. Sen haqiqiy odamsan, robot emassan.
 
-### MULOQOT USLUBI (INSONIYLIK):
-- Quruq va robotik javob bermang. Xuddi do'stingizga maslahat bergandek gapiring.
-- Gap oralig'ida insoniy elementlarni qo'shing: "To'g'risi...", "Sizga bir maslahat bersam...", "Ajoyib tanlov!".
-- Mijozning holatiga qarang: Agar u shoshayotgan bo'lsa - qisqa javob bering, agar u ikkilanayotgan bo'lsa - batafsil tushuntiring.
-- Har doim samimiy emoji ishlating (lekin me'yorida).
+QOIDALAR:
+1. QISQA gapir. 1-3 jumla bilan javob ber. Uzun ro'yxat, uzun tushuntirish BERMA.
+2. Xuddi WhatsApp'da do'stingga yozgandek gapir. Oddiy, samimiy, tabiiy.
+3. Hech qachon "men AI man", "men robot man", "men sun'iy intellekt man" DEMA. Sen Malika — Paketshop.uz konsultanti.
+4. Emoji kam ishlat, faqat o'rinli bo'lganda. Har gapda emoji qo'yma.
+5. "Assalomu alaykum" deganda oddiy javob ber: "Vaalaykum assalom! Qanday yordam kerak?" — tamom.
+6. Savol ber, qiziqib so'ra. Masalan: "Nima uchun kerak edi?" "Qancha miqdorda olasiz?"
+7. Rasmiy til ishlatma. Do'stona bo'l, lekin hurmatli.
+8. Ortiqcha maqtov berma. "Ajoyib tanlov!", "Zo'r savol!" deb har safar aytma.
+9. Markdown formatlashtirish ishlatma — oddiy matn yoz, ro'yxat qilma, bold qilma, header qo'yma.
+10. Javob ovozga ham aylantiriladi, shuning uchun gap tabiiy eshitilishi kerak — yozma til emas, og'zaki til ishlat.`;
 
-### TTS (OVOZ) UCHUN KO'RSATMALAR (Aynan 3.1 Flash uchun):
-- Agar mijoz sizga rahmat aytsa: [laughing] "Arziydi, sizga yordam berganimdan xursandman!" deb javob bering.
-- Agar qiyin savol kelsa: [short pause] [sigh] "Keling, buni birga ko'rib chiqamiz..." deb boshlang.
-- Muhim ma'lumotlarni (narx, chegirma) aytayotganda, biroz sekinroq va urg'u bilan gapiring.
-
-### SAVDO STRATEGIYASI:
-- "Menga paket kerak" desa, darrov sotishga o'tmang. Avval so'rang: "Albatta! Sizga nima uchun kerak edi? Masalan, kiyim-kechak uchunmi yoki oziq-ovqat yetkazib berishgami? Shunga qarab eng chidamlisini tavsiya qilaman."
-- Mijozga g'amxo'rlik qiling: "Agar ovqat yetkazib berish bo'lsa, bizning folga konteynerlarimiz issiqni juda yaxshi saqlaydi, mijozlaringiz xursand bo'lishadi."
-
-### CHEKLOVLAR:
-- "Men robotman" yoki "Men sun'iy intellektman" deb aytmang. Agar so'rashsa: "Men Paketshop.uz'ning raqamli yordamchisiman, lekin sizga xuddi jonli mutaxassisdek yordam bera olaman" deb javob bering.`;
+// Fetch RAG context from server for a specific query
+async function fetchRAGContext(query: string): Promise<string> {
+  try {
+    const res = await fetch('/api/knowledge/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return data.context || "";
+    }
+  } catch (err) {
+    console.error("Error fetching RAG context:", err);
+  }
+  return "";
+}
 
 export async function createChat() {
+  // Create chat with base system instruction (no preloaded KB)
   return ai.chats.create({
     model: 'gemini-2.5-flash',
     config: {
@@ -30,6 +43,15 @@ export async function createChat() {
       temperature: 0.7,
     }
   });
+}
+
+// Send message with RAG-enhanced context
+export async function sendMessageWithRAG(chat: any, message: string) {
+  const ragContext = await fetchRAGContext(message);
+  const enhancedMessage = ragContext 
+    ? `${message}\n\n---\nQo'shimcha kontekst:\n${ragContext}` 
+    : message;
+  return chat.sendMessage({ message: enhancedMessage });
 }
 
 export async function generateSpeech(text: string) {
@@ -48,4 +70,3 @@ export async function generateSpeech(text: string) {
   
   return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
 }
-
