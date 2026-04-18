@@ -8,7 +8,6 @@ import { generateEmbedding, searchKnowledgeBase } from './ai.js';
 import { GoogleGenAI } from "@google/genai";
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
-const pdfParse = require('pdf-parse');
 
 const __filename = fileURLToPath(import.meta.url);
 const projectRoot = path.join(path.dirname(__filename), '../..');
@@ -173,6 +172,10 @@ router.post("/knowledge/upload", requireAdmin, uploadMemory.single('file'), asyn
     const fileName = req.file.originalname;
 
     if (req.file.mimetype === 'application/pdf') {
+      if (typeof globalThis.DOMMatrix === 'undefined') {
+          globalThis.DOMMatrix = class DOMMatrix {} as any;
+      }
+      const pdfParse = require('pdf-parse');
       const pdfData = await pdfParse(req.file.buffer);
       extractedText = pdfData.text;
     } 
