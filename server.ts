@@ -33,6 +33,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export const app = express();
+app.set('trust proxy', 1); // Vercel runs behind a proxy
 app.use(express.json());
 
 // Initialize Database safely
@@ -42,15 +43,16 @@ try {
   console.error("Database initialization failed:", e);
 }
 
-// Setup API Routes
-app.use('/api', router);
-
-// Setup Telegram Bot safely
+// Setup Telegram Bot FIRST — before API router
+// so the webhook handler isn't blocked by rate limiter
 try {
   setupBot(app);
 } catch (e) {
   console.error("Telegram bot setup failed:", e);
 }
+
+// Setup API Routes (has rate limiter — must be after bot)
+app.use('/api', router);
 
 // Setup local dev server or static rendering when NOT in Vercel
 if (!process.env.VERCEL) {

@@ -95,15 +95,18 @@ export function setupBot(app: any) {
           const webhookPath = `/api/telegram`;
           const webhookUrl = `https://${domain}${webhookPath}`;
           
-          // Use explicit POST handler with await — critical for serverless:
-          // without await, Vercel terminates the function before processing completes
+          // Don't pass res to handleUpdate — forces Telegraf to use standard API
+          // method for replies, which is more reliable in serverless environments
           app.post(webhookPath, async (req: any, res: any) => {
+            const updateId = req.body?.update_id || 'unknown';
+            console.log(`📨 Webhook received update #${updateId}`);
             try {
-              await bot.handleUpdate(req.body, res);
+              await bot.handleUpdate(req.body);
+              console.log(`✅ Update #${updateId} processed`);
             } catch (err) {
-              console.error("Webhook handler error:", err);
-              res.status(200).end(); // Always return 200 to Telegram
+              console.error(`❌ Update #${updateId} error:`, err);
             }
+            res.status(200).json({ ok: true });
           });
           
           bot.telegram.setWebhook(webhookUrl).then(() => {
