@@ -1,22 +1,6 @@
 import { Telegraf } from "telegraf";
-import { GoogleGenAI, Modality } from "@google/genai";
-import path from "path";
-import fs from 'fs';
-import os from 'os';
-import ffmpeg from 'fluent-ffmpeg';
-import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
-import { fileURLToPath } from 'url';
+import { GoogleGenAI } from "@google/genai";
 import { SYSTEM_INSTRUCTION, searchKnowledgeBase } from './ai.js';
-
-try {
-    ffmpeg.setFfmpegPath(ffmpegInstaller.path);
-} catch (e) {
-    console.error("Failed to initialize ffmpeg on Vercel:", e);
-}
-
-const __filename = fileURLToPath(import.meta.url);
-// the public directory will be relative to project root. We are in src/server, so project root is ../..
-const projectRoot = path.join(path.dirname(__filename), '../..');
 
 export function setupBot(app: any) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
@@ -63,12 +47,12 @@ export function setupBot(app: any) {
       let imageUrls: string[] = [];
       let videoUrls: string[] = [];
 
-      finalResponseText = finalResponseText.replace(/\[IMAGE: (.*?)\]/g, (match, url) => {
+      finalResponseText = finalResponseText.replace(/\[IMAGE: (.*?)\]/g, (_match, url) => {
         imageUrls.push(url);
         return "";
       });
 
-      finalResponseText = finalResponseText.replace(/\[VIDEO: (.*?)\]/g, (match, url) => {
+      finalResponseText = finalResponseText.replace(/\[VIDEO: (.*?)\]/g, (_match, url) => {
         videoUrls.push(url);
         return "";
       });
@@ -83,62 +67,12 @@ export function setupBot(app: any) {
          plainText += "\n\nBatafsil video: " + videoUrls.join(", ");
       }
 
-      // Generate Voice Buffer FIRST
-      let oggBuffer: Buffer | null = null;
-      try {
-          await ctx.sendChatAction('record_voice');
-          const currentAi = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY as string });
-          const ttsResponse = await currentAi.models.generateContent({
-             model: 'gemini-3.1-flash-tts-preview',
-             contents: [{ parts: [{ text: responseText }] }],
-             config: {
-                responseModalities: [Modality.AUDIO],
-                speechConfig: {
-                  voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
-                },
-             },
-          });
-          const base64Audio = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-          if (base64Audio) {
-             const pcmBuffer = Buffer.from(base64Audio, 'base64');
-             oggBuffer = await new Promise<Buffer>((resolve, reject) => {
-               const tmpPcm = path.join(os.tmpdir(), `tts_${Date.now()}.pcm`);
-               const tmpOgg = path.join(os.tmpdir(), `tts_${Date.now()}.ogg`);
-               fs.writeFileSync(tmpPcm, pcmBuffer);
-               
-               ffmpeg()
-                 .input(tmpPcm)
-                 .inputFormat('s16le')
-                 .inputOptions(['-ar 24000', '-ac 1'])
-                 .audioCodec('libopus')
-                 .audioFrequency(48000)
-                 .audioChannels(1)
-                 .format('ogg')
-                 .output(tmpOgg)
-                 .on('end', () => {
-                   const ogg = fs.readFileSync(tmpOgg);
-                   try { fs.unlinkSync(tmpPcm); } catch {}
-                   try { fs.unlinkSync(tmpOgg); } catch {}
-                   resolve(ogg);
-                 })
-                 .on('error', (err: any) => {
-                   try { fs.unlinkSync(tmpPcm); } catch {}
-                   try { fs.unlinkSync(tmpOgg); } catch {}
-                   reject(err);
-                 })
-                 .run();
-             });
-          }
-      } catch (e: any) {
-         console.error("Telegram bot TTS error:", e);
-      }
-
-      // NOW send everything together
+      // Send response — use Cloudinary URLs for images (no local files on Vercel)
       if (imageUrls.length > 0) {
          const firstImage = imageUrls[0];
-         const imagePath = path.join(projectRoot, 'public', firstImage);
-         if (fs.existsSync(imagePath)) {
-            await ctx.replyWithPhoto({ source: imagePath }, { caption: plainText });
+         // Cloudinary or external URLs — send directly
+         if (firstImage.startsWith('http')) {
+            await ctx.replyWithPhoto({ url: firstImage }, { caption: plainText });
          } else {
             await ctx.reply(plainText);
          }
@@ -146,17 +80,13 @@ export function setupBot(app: any) {
          await ctx.reply(plainText);
       }
 
-      if (oggBuffer) {
-         await ctx.replyWithVoice({ source: oggBuffer });
-      }
-
     } catch (err: any) {
       console.error("Bot error processing message:", err);
-      await ctx.reply(`Uzur, texnik xatolik yuz berdi.`);
+      await ctx.reply("Uzur, texnik xatolik yuz berdi. Iltimos qayta urinib ko'ring.");
     }
   });
 
-  bot.catch(err => console.error("Bot error:", err));
+  bot.catch((err: any) => console.error("Bot error:", err));
 
   if (process.env.VERCEL) {
       console.log("Running in Vercel Serverless Webhook mode");
@@ -165,10 +95,15 @@ export function setupBot(app: any) {
           const webhookPath = `/api/telegram`;
           const webhookUrl = `https://${domain}${webhookPath}`;
           
-          // Use explicit POST handler — app.use(path, callback) strips the mount path,
-          // which breaks Telegraf's internal path matching in webhookCallback()
-          app.post(webhookPath, (req: any, res: any) => {
-            bot.handleUpdate(req.body, res);
+          // Use explicit POST handler with await — critical for serverless:
+          // without await, Vercel terminates the function before processing completes
+          app.post(webhookPath, async (req: any, res: any) => {
+            try {
+              await bot.handleUpdate(req.body, res);
+            } catch (err) {
+              console.error("Webhook handler error:", err);
+              res.status(200).end(); // Always return 200 to Telegram
+            }
           });
           
           bot.telegram.setWebhook(webhookUrl).then(() => {
@@ -186,3 +121,4 @@ export function setupBot(app: any) {
       process.once('SIGTERM', () => bot.stop('SIGTERM'));
   }
 }
+
