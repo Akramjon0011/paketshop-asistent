@@ -1,0 +1,22 @@
+{
+  "entities": {
+    "FaqCache": {
+      "title": "FAQ Cache",
+      "description": "Caches the text and audio file ID for a specific question",
+      "type": "object",
+      "properties": {
+        "question": { "type": "string", "description": "The exact question text" },
+        "answer": { "type": "string", "description": "The generated text answer" },
+        "fileId": { "type": "string", "description": "Telegram voice file_id" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" }
+      },
+      "required": ["question", "answer", "fileId", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/faq_cache/{questionHash}": {
+      "schema": { "$ref": "#/entities/FaqCache" },
+      "description": "Cache for questions to avoid regenerating text and audio"
+    }
+  }
+}
