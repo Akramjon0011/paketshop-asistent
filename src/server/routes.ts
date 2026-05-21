@@ -1,7 +1,7 @@
 import express from 'express';
 import multer from 'multer';
 import { sql } from './db.js';
-import { generateEmbedding, searchKnowledgeBase, handleConversationalChat, transcribeAudio, generateSpeech, BRAND, BRAND_GREETING } from './ai.js';
+import { generateEmbedding, searchKnowledgeBase, handleConversationalChat, handleConversationalChatStream, transcribeAudio, generateSpeech, BRAND, BRAND_GREETING } from './ai.js';
 import { GoogleGenAI } from "@google/genai";
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -30,6 +30,36 @@ async function uploadToCloudinary(buffer: Buffer, folder: string): Promise<strin
 // Basic health check endpoint
 router.get("/health", (req, res) => {
   res.json({ status: "ok" });
+});
+
+// Public: featured products for the chat carousel — latest 6 + top-sold 6
+router.get("/products/featured", async (_req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  try {
+    const [latest, popular] = await Promise.all([
+      sql`
+        SELECT id, name, description, price, category, image_url
+        FROM products WHERE stock > 0
+        ORDER BY created_at DESC LIMIT 6
+      `,
+      sql`
+        SELECT p.id, p.name, p.description, p.price, p.category, p.image_url,
+               COALESCE(SUM((item->>'quantity')::integer), 0)::integer AS units_sold
+        FROM products p
+        LEFT JOIN orders o ON o.status != 'cancelled'
+        LEFT JOIN jsonb_array_elements(o.items) AS item
+          ON (item->>'product_id')::integer = p.id
+        WHERE p.stock > 0
+        GROUP BY p.id
+        ORDER BY units_sold DESC, p.created_at DESC
+        LIMIT 6
+      `,
+    ]);
+    res.json({ latest, popular });
+  } catch (err) {
+    console.error("Featured products error:", err);
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 // Public branding config — used by frontend to render shop name, assistant name, colors
@@ -340,6 +370,41 @@ router.post("/chat", async (req, res) => {
   } catch (err) {
     console.error("Chat error:", err);
     res.status(500).json({ error: "Tizimda xatolik yuz berdi" });
+  }
+});
+
+// 1.2. Streaming chat (SSE) — text appears progressively
+router.post("/chat/stream", async (req, res) => {
+  const { message, history, webSessionId } = req.body;
+  if (!message) {
+    res.status(400).json({ error: "Xabar majburiy" });
+    return;
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  const writeEvent = (event: string, data: any) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  try {
+    const fullText = await handleConversationalChatStream(
+      message,
+      history || [],
+      { webSessionId },
+      (chunk) => writeEvent('chunk', { text: chunk })
+    );
+    writeEvent('done', { reply: fullText });
+    res.end();
+  } catch (err) {
+    console.error("Chat stream error:", err);
+    writeEvent('error', { error: "Tizimda xatolik yuz berdi" });
+    res.end();
   }
 });
 

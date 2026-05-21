@@ -701,6 +701,36 @@ Qoida: Mijozni samimiy tarzda ismi bilan chaqirib salomlashing. Agar mijoz buyur
   }
 }
 
+// Streaming version: runs same tool-loop, but emits the final text chunk-by-chunk via callback.
+export async function handleConversationalChatStream(
+  message: string,
+  history: Array<{ role: 'user' | 'model'; content: string }>,
+  userContext: { telegramId?: number; webSessionId?: string } | undefined,
+  onChunk: (text: string) => void
+): Promise<string> {
+  const fullText = await handleConversationalChat(message, history, userContext);
+
+  // Tokenize into small chunks (3-4 words) for a streaming feel without changing the tool loop
+  const tokens = fullText.split(/(\s+)/);
+  let buf = '';
+  let wordCount = 0;
+  for (const t of tokens) {
+    buf += t;
+    if (/\s/.test(t)) {
+      wordCount++;
+      if (wordCount >= 2) {
+        onChunk(buf);
+        buf = '';
+        wordCount = 0;
+        await new Promise(r => setTimeout(r, 30));
+      }
+    }
+  }
+  if (buf) onChunk(buf);
+
+  return fullText;
+}
+
 // Transcribe raw audio to text using Gemini 2.5 Flash
 export async function transcribeAudio(audioBuffer: Buffer, mimeType: string): Promise<string | null> {
   try {

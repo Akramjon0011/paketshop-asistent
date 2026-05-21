@@ -29,6 +29,15 @@ type BrandConfig = {
   currency: string;
 };
 
+type FeaturedProduct = {
+  id: number;
+  name: string;
+  description: string | null;
+  price: string | number;
+  category: string | null;
+  image_url: string | null;
+};
+
 const DEFAULT_BRAND: BrandConfig = {
   shopName: "Paketshop.uz",
   assistantName: "Malika",
@@ -48,6 +57,8 @@ export default function Chat() {
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
   const [webSessionId, setWebSessionId] = useState('');
   const [isRecording, setIsRecording] = useState(false);
+  const [featured, setFeatured] = useState<{ latest: FeaturedProduct[]; popular: FeaturedProduct[] }>({ latest: [], popular: [] });
+  const [carouselMode, setCarouselMode] = useState<'popular' | 'latest'>('popular');
 
   useEffect(() => {
     fetch('/api/config')
@@ -60,7 +71,16 @@ export default function Chat() {
           : prev);
       })
       .catch(() => { /* keep defaults */ });
+
+    fetch('/api/products/featured')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data) setFeatured(data); })
+      .catch(() => { /* ignore */ });
   }, []);
+
+  const handleProductClick = (p: FeaturedProduct) => {
+    setInput(`Mana shu mahsulot haqida ko'proq ma'lumot bering: "${p.name}" (ID: ${p.id})`);
+  };
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -144,14 +164,10 @@ export default function Chat() {
     stopCurrentAudio(); // Stop audio if user types a new message
 
     try {
-      // Map current chat history for backend (clean role and content structure)
-      const chatHistory = messages.map(m => ({
-        role: m.role,
-        content: m.content
-      }));
+      const chatHistory = messages.map(m => ({ role: m.role, content: m.content }));
+      const modelMessageId = (Date.now() + 1).toString();
 
-      // Call our backend API instead of calling Google GenAI directly from client
-      const res = await fetch('/api/chat', {
+      const res = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -161,28 +177,70 @@ export default function Chat() {
         })
       });
 
-      if (!res.ok) {
+      if (!res.ok || !res.body) {
         throw new Error("Tizim bilan ulanib bo'lmadi.");
       }
 
-      const data = await res.json();
-      const replyText = data.reply || "Kechirasiz, men tushuna olmadim.";
-      const modelMessageId = (Date.now() + 1).toString();
+      // Add empty bubble that will be appended to as chunks arrive
+      let firstChunkReceived = false;
+      let fullReply = '';
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
 
-      // Fetch TTS first (if enabled) so text + voice appear together
-      let audioData = null;
-      if (isAudioEnabled && replyText) {
-          try {
-              audioData = await generateSpeech(replyText);
-          } catch(err) {
-              console.error("TTS generation failed: ", err);
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        // Parse SSE events split by blank line
+        const events = buf.split('\n\n');
+        buf = events.pop() || '';
+        for (const block of events) {
+          const lines = block.split('\n');
+          let eventName = 'message';
+          let dataStr = '';
+          for (const line of lines) {
+            if (line.startsWith('event: ')) eventName = line.slice(7).trim();
+            else if (line.startsWith('data: ')) dataStr += line.slice(6);
           }
+          if (!dataStr) continue;
+          try {
+            const payload = JSON.parse(dataStr);
+            if (eventName === 'chunk') {
+              if (!firstChunkReceived) {
+                firstChunkReceived = true;
+                setIsLoading(false); // hide typing dots once text starts
+                setMessages(prev => [...prev, { id: modelMessageId, role: 'model', content: '' }]);
+              }
+              fullReply += payload.text;
+              setMessages(prev => prev.map(m =>
+                m.id === modelMessageId ? { ...m, content: fullReply } : m
+              ));
+            } else if (eventName === 'done') {
+              if (payload.reply && payload.reply !== fullReply) {
+                fullReply = payload.reply;
+                setMessages(prev => prev.map(m =>
+                  m.id === modelMessageId ? { ...m, content: fullReply } : m
+                ));
+              }
+            } else if (eventName === 'error') {
+              throw new Error(payload.error || "Stream xatosi");
+            }
+          } catch (parseErr) {
+            console.warn("SSE parse error:", parseErr, dataStr);
+          }
+        }
       }
 
-      // Now reveal message and start audio in the same tick
-      setMessages(prev => [...prev, { id: modelMessageId, role: 'model', content: replyText }]);
-      if (audioData) {
-          playPCMBase64(audioData, modelMessageId);
+      // Generate and play TTS audio after streaming completes
+      if (isAudioEnabled && fullReply) {
+        try {
+          const audioData = await generateSpeech(fullReply);
+          if (audioData) playPCMBase64(audioData, modelMessageId);
+        } catch (audioErr) {
+          console.error("TTS generation failed: ", audioErr);
+        }
       }
 
     } catch (err: any) {
@@ -390,6 +448,55 @@ export default function Chat() {
           <div ref={messagesEndRef} />
         </div>
       </main>
+
+      {/* Featured Products Carousel */}
+      {(featured.popular.length > 0 || featured.latest.length > 0) && (
+        <div className="bg-white border-t border-gray-100 px-4 pt-3 pb-2 shrink-0">
+          <div className="w-full max-w-4xl mx-auto">
+            <div className="flex items-center gap-3 mb-2">
+              <button
+                onClick={() => setCarouselMode('popular')}
+                className={`text-xs font-bold px-3 py-1 rounded-full transition-all ${
+                  carouselMode === 'popular' ? 'bg-amber-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                🔥 Mashhur
+              </button>
+              <button
+                onClick={() => setCarouselMode('latest')}
+                className={`text-xs font-bold px-3 py-1 rounded-full transition-all ${
+                  carouselMode === 'latest' ? 'bg-amber-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                ✨ Yangi
+              </button>
+            </div>
+            <div className="flex gap-3 overflow-x-auto pb-2 -mx-1 px-1 snap-x">
+              {(carouselMode === 'popular' ? featured.popular : featured.latest).map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => handleProductClick(p)}
+                  className="snap-start shrink-0 w-32 sm:w-36 bg-white border border-gray-200 hover:border-amber-400 hover:shadow-md rounded-xl overflow-hidden transition-all text-left"
+                >
+                  {p.image_url ? (
+                    <img src={p.image_url} alt={p.name} className="w-full h-20 object-cover" />
+                  ) : (
+                    <div className="w-full h-20 bg-gray-100 flex items-center justify-center">
+                      <Package className="w-6 h-6 text-gray-300" />
+                    </div>
+                  )}
+                  <div className="p-2">
+                    <p className="text-xs font-bold text-gray-900 line-clamp-1">{p.name}</p>
+                    <p className="text-xs font-extrabold text-amber-600 mt-0.5">
+                      {Number(p.price).toLocaleString()} {brand.currency}
+                    </p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Input Area */}
       <footer className="bg-white border-t border-gray-200 p-4 shrink-0">
