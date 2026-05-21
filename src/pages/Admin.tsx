@@ -1,7 +1,89 @@
 import { useState, useEffect } from 'react';
-import { Shield, Key, Plus, Trash2, Database, AlertCircle, Loader2, Package, ShoppingBag, Eye, CheckCircle, Clock, Truck, XCircle, Pencil, X, Users } from 'lucide-react';
+import { Shield, Key, Plus, Trash2, Database, AlertCircle, Loader2, Package, ShoppingBag, Eye, CheckCircle, Clock, Truck, XCircle, Pencil, X, Users, BarChart3, TrendingUp, DollarSign, Upload } from 'lucide-react';
 
-type Tab = 'knowledge' | 'products' | 'orders' | 'customers';
+type Tab = 'analytics' | 'knowledge' | 'products' | 'orders' | 'customers';
+
+type Analytics = {
+  totals: { total_orders: number; total_revenue: number; unique_customers: number };
+  statusCounts: Array<{ status: string; count: number }>;
+  dailyRevenue: Array<{ day: string; revenue: number; orders: number }>;
+  topProducts: Array<{ product_id: number; name: string; units_sold: number; revenue: number }>;
+  today: { today_revenue: number; today_orders: number; week_orders: number };
+  conversion: { chatUsers: number; buyingCustomers: number; rate: number };
+} | null;
+
+function StatCard({ icon, label, value, sub, color }: {
+  icon: React.ReactNode; label: string; value: string; sub?: string; color: 'amber' | 'blue' | 'green' | 'purple';
+}) {
+  const colorMap = {
+    amber: 'bg-amber-100 text-amber-600',
+    blue: 'bg-blue-100 text-blue-600',
+    green: 'bg-green-100 text-green-600',
+    purple: 'bg-purple-100 text-purple-600',
+  };
+  return (
+    <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
+      <div className="flex items-center justify-between mb-3">
+        <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${colorMap[color]}`}>
+          <div className="w-5 h-5">{icon}</div>
+        </div>
+      </div>
+      <p className="text-xs font-bold text-gray-500 uppercase tracking-wider">{label}</p>
+      <p className="text-2xl font-black text-gray-900 mt-1 break-all">{value}</p>
+      {sub && <p className="text-xs text-gray-400 mt-1">{sub}</p>}
+    </div>
+  );
+}
+
+function StatusRow({ status, count }: { status: string; count: number }) {
+  const map: Record<string, { label: string; color: string }> = {
+    pending: { label: 'Kutilmoqda', color: 'bg-blue-500' },
+    processing: { label: "Jo'natilmoqda", color: 'bg-amber-500' },
+    delivered: { label: 'Yetkazildi', color: 'bg-green-500' },
+    cancelled: { label: 'Bekor qilindi', color: 'bg-red-500' },
+  };
+  const info = map[status] || { label: status, color: 'bg-gray-500' };
+  return (
+    <div className="flex items-center gap-3">
+      <span className={`w-3 h-3 rounded-full ${info.color}`} />
+      <span className="font-bold text-gray-800 flex-1">{info.label}</span>
+      <span className="text-lg font-black text-gray-900">{count}</span>
+    </div>
+  );
+}
+
+function DailyRevenueChart({ data }: { data: Array<{ day: string; revenue: number; orders: number }> }) {
+  if (data.length === 0) {
+    return <p className="text-gray-400 text-sm text-center py-8">Hozircha sotuvlar bo'lmagan.</p>;
+  }
+  const max = Math.max(...data.map(d => Number(d.revenue))) || 1;
+  const width = 800;
+  const height = 200;
+  const barW = Math.max(8, (width - 40) / data.length - 4);
+  return (
+    <div className="overflow-x-auto">
+      <svg viewBox={`0 0 ${width} ${height + 40}`} className="w-full min-w-[400px]">
+        {data.map((d, i) => {
+          const h = (Number(d.revenue) / max) * height;
+          const x = 20 + i * (barW + 4);
+          const y = height - h + 10;
+          return (
+            <g key={d.day}>
+              <rect x={x} y={y} width={barW} height={h} rx={3} className="fill-amber-400 hover:fill-amber-500" />
+              <title>{`${d.day}: ${Number(d.revenue).toLocaleString()} so'm (${d.orders} buyurtma)`}</title>
+              {i === data.length - 1 || i === 0 || i === Math.floor(data.length / 2) ? (
+                <text x={x + barW / 2} y={height + 30} textAnchor="middle" className="text-[10px] fill-gray-500">
+                  {new Date(d.day).toLocaleDateString('uz-UZ', { month: 'short', day: 'numeric' })}
+                </text>
+              ) : null}
+            </g>
+          );
+        })}
+      </svg>
+      <p className="text-xs text-gray-400 mt-2">Eng yuqori kun: <span className="font-bold text-gray-700">{Number(max).toLocaleString()} so'm</span></p>
+    </div>
+  );
+}
 
 type EditingProduct = {
   id: number;
@@ -26,7 +108,7 @@ export default function Admin() {
   const [token, setToken] = useState('');
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [loginError, setLoginError] = useState('');
-  const [activeTab, setActiveTab] = useState<Tab>('knowledge');
+  const [activeTab, setActiveTab] = useState<Tab>('analytics');
 
   // --- Knowledge Base State ---
   const [knowledgeBase, setKnowledgeBase] = useState<any[]>([]);
@@ -47,6 +129,9 @@ export default function Admin() {
 
   // --- Customers State ---
   const [customers, setCustomers] = useState<any[]>([]);
+
+  // --- Analytics State ---
+  const [analytics, setAnalytics] = useState<Analytics>(null);
 
   // --- Edit Modal State ---
   const [editingProduct, setEditingProduct] = useState<EditingProduct>(null);
@@ -112,6 +197,16 @@ export default function Admin() {
           setCustomers(data);
         } else {
           setError('Mijozlar ro\'yxatini yuklab bo\'lmadi');
+        }
+      } else if (activeTab === 'analytics') {
+        const res = await fetch('/api/admin/analytics', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setAnalytics(data);
+        } else {
+          setError('Analitika ma\'lumotlarini yuklab bo\'lmadi');
         }
       }
     } catch (err) {
@@ -463,7 +558,15 @@ export default function Admin() {
         </div>
 
         {/* Tabs Bar */}
-        <div className="bg-white p-2 rounded-2xl border border-gray-100 shadow-sm flex space-x-2">
+        <div className="bg-white p-2 rounded-2xl border border-gray-100 shadow-sm flex flex-wrap gap-2">
+          <button
+            onClick={() => setActiveTab('analytics')}
+            className={`flex-1 min-w-[120px] flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-bold transition-all ${
+              activeTab === 'analytics' ? 'bg-amber-500 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            <BarChart3 className="w-4 h-4" /> Analitika
+          </button>
           <button
             onClick={() => setActiveTab('knowledge')}
             className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-bold transition-all ${
@@ -502,6 +605,94 @@ export default function Admin() {
           <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-xl flex items-center">
             <AlertCircle className="w-5 h-5 mr-2" />
             {error}
+          </div>
+        )}
+
+        {/* --- TAB 0: ANALYTICS DASHBOARD --- */}
+        {activeTab === 'analytics' && (
+          <div className="space-y-6 animate-fadeIn">
+            {isLoading && !analytics ? (
+              <div className="p-12 flex justify-center text-amber-500">
+                <Loader2 className="w-8 h-8 animate-spin" />
+              </div>
+            ) : !analytics ? (
+              <div className="p-12 text-center text-gray-500">Ma'lumot yuklanmadi</div>
+            ) : (
+              <>
+                {/* Top Summary Cards */}
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                  <StatCard icon={<DollarSign />} label="Bugungi daromad" value={`${Number(analytics.today.today_revenue).toLocaleString()} so'm`} color="amber" />
+                  <StatCard icon={<ShoppingBag />} label="Bugungi buyurtmalar" value={String(analytics.today.today_orders)} color="blue" />
+                  <StatCard icon={<TrendingUp />} label="Haftalik buyurtmalar" value={String(analytics.today.week_orders)} color="green" />
+                  <StatCard icon={<Users />} label="Konversiya" value={`${analytics.conversion.rate}%`} sub={`${analytics.conversion.buyingCustomers} / ${analytics.conversion.chatUsers}`} color="purple" />
+                </div>
+
+                {/* All-Time Totals */}
+                <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+                  <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-4">Umumiy ko'rsatkichlar</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div>
+                      <p className="text-xs text-gray-500 font-bold uppercase">Jami buyurtmalar</p>
+                      <p className="text-3xl font-black text-gray-900 mt-1">{analytics.totals.total_orders}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500 font-bold uppercase">Jami daromad</p>
+                      <p className="text-3xl font-black text-amber-600 mt-1">{Number(analytics.totals.total_revenue).toLocaleString()} so'm</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500 font-bold uppercase">Faol mijozlar</p>
+                      <p className="text-3xl font-black text-gray-900 mt-1">{analytics.totals.unique_customers}</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Daily Revenue Chart */}
+                <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+                  <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-4">So'nggi 30 kun daromadi</h3>
+                  <DailyRevenueChart data={analytics.dailyRevenue} />
+                </div>
+
+                {/* Top Products + Status Breakdown */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+                    <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-4">Eng ko'p sotilgan mahsulotlar</h3>
+                    {analytics.topProducts.length === 0 ? (
+                      <p className="text-gray-400 text-sm">Hozircha ma'lumot yo'q</p>
+                    ) : (
+                      <div className="space-y-3">
+                        {analytics.topProducts.map((p, idx) => (
+                          <div key={p.product_id} className="flex items-center gap-3">
+                            <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-black text-sm ${
+                              idx === 0 ? 'bg-amber-500 text-white' : 'bg-amber-100 text-amber-700'
+                            }`}>
+                              {idx + 1}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="font-bold text-gray-900 truncate">{p.name}</p>
+                              <p className="text-xs text-gray-500">{p.units_sold} ta sotildi</p>
+                            </div>
+                            <span className="font-extrabold text-amber-600 text-sm">{Number(p.revenue).toLocaleString()} so'm</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+                    <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-4">Buyurtma holatlari</h3>
+                    {analytics.statusCounts.length === 0 ? (
+                      <p className="text-gray-400 text-sm">Hozircha buyurtmalar yo'q</p>
+                    ) : (
+                      <div className="space-y-3">
+                        {analytics.statusCounts.map((s) => (
+                          <StatusRow key={s.status} status={s.status} count={s.count} />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         )}
 
@@ -784,6 +975,57 @@ export default function Admin() {
                     className="w-full flex justify-center items-center py-3 px-4 border border-transparent rounded-xl shadow-sm text-sm font-bold text-white bg-amber-500 hover:bg-amber-600 focus:outline-none transition-all disabled:opacity-50"
                   >
                     {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : 'Qo\'shish'}
+                  </button>
+                </form>
+              </div>
+
+              {/* CSV Bulk Import */}
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden mt-6">
+                <div className="p-6 bg-amber-50 border-b border-amber-100">
+                  <h2 className="text-lg font-bold text-amber-900 flex items-center">
+                    <Upload className="w-5 h-5 mr-2 text-amber-600" />
+                    CSV import (ko'p mahsulot)
+                  </h2>
+                  <p className="text-xs text-amber-700 mt-1">
+                    Ustunlar: <code className="bg-white px-1 rounded">name,price,description,category,stock,image_url</code> (birinchi qator — sarlavhalar)
+                  </p>
+                </div>
+                <form onSubmit={async (e) => {
+                  e.preventDefault();
+                  const fileInput = (e.target as HTMLFormElement).elements.namedItem('csvFile') as HTMLInputElement;
+                  const file = fileInput.files?.[0];
+                  if (!file) return;
+                  setIsLoading(true);
+                  setError('');
+                  const formData = new FormData();
+                  formData.append('file', file);
+                  try {
+                    const res = await fetch('/api/admin/products/bulk', {
+                      method: 'POST',
+                      headers: { 'Authorization': `Bearer ${token}` },
+                      body: formData
+                    });
+                    const data = await res.json();
+                    if (res.ok) {
+                      fileInput.value = '';
+                      fetchData();
+                      const msg = `${data.inserted}/${data.total} qator qo'shildi.` +
+                        (data.errors?.length ? ` Xatolar: ${data.errors.slice(0, 3).join('; ')}${data.errors.length > 3 ? '...' : ''}` : '');
+                      window.alert(msg);
+                    } else {
+                      setError(data.error || 'Import xatosi');
+                    }
+                  } catch {
+                    setError('Tarmoq xatosi');
+                  } finally {
+                    setIsLoading(false);
+                  }
+                }} className="p-6 space-y-4">
+                  <input type="file" name="csvFile" accept=".csv,text/csv" required
+                    className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-amber-50 file:text-amber-700 hover:file:bg-amber-100 cursor-pointer" />
+                  <button type="submit" disabled={isLoading}
+                    className="w-full flex justify-center items-center py-3 px-4 rounded-xl text-sm font-bold text-amber-700 bg-amber-100 hover:bg-amber-200 disabled:opacity-50">
+                    {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : "CSV yuklash va import qilish"}
                   </button>
                 </form>
               </div>

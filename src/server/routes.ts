@@ -495,6 +495,83 @@ router.put("/admin/products/:id", requireAdmin, uploadImageMemory.single('image'
   }
 });
 
+// 3.6. Admin: Bulk import products from CSV
+// CSV format: name,price,description,category,stock,image_url (first row = headers)
+function parseCSV(text: string): Array<Record<string, string>> {
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) return [];
+
+  const parseRow = (line: string): string[] => {
+    const out: string[] = [];
+    let cur = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQuotes && line[i + 1] === '"') { cur += '"'; i++; }
+        else inQuotes = !inQuotes;
+      } else if (ch === ',' && !inQuotes) {
+        out.push(cur); cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    out.push(cur);
+    return out.map(s => s.trim());
+  };
+
+  const headers = parseRow(lines[0]).map(h => h.toLowerCase());
+  return lines.slice(1).map(line => {
+    const cells = parseRow(line);
+    const row: Record<string, string> = {};
+    headers.forEach((h, i) => row[h] = cells[i] || '');
+    return row;
+  });
+}
+
+router.post("/admin/products/bulk", requireAdmin, uploadImageMemory.single('file'), async (req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  if (!req.file) return res.status(400).json({ error: "CSV fayl yuborilmadi" });
+
+  try {
+    const text = req.file.buffer.toString('utf-8');
+    const rows = parseCSV(text);
+    if (rows.length === 0) return res.status(400).json({ error: "CSV bo'sh yoki noto'g'ri formatda" });
+
+    let inserted = 0;
+    const errors: string[] = [];
+
+    for (const [idx, row] of rows.entries()) {
+      const name = row.name?.trim();
+      const priceStr = row.price?.trim();
+      if (!name || !priceStr) {
+        errors.push(`Qator ${idx + 2}: name yoki price yo'q`);
+        continue;
+      }
+      const price = parseFloat(priceStr);
+      if (isNaN(price)) {
+        errors.push(`Qator ${idx + 2}: price raqam emas (${priceStr})`);
+        continue;
+      }
+      const stock = parseInt(row.stock || '10', 10) || 10;
+      try {
+        await sql`
+          INSERT INTO products (name, description, price, category, stock, image_url)
+          VALUES (${name}, ${row.description || null}, ${price}, ${row.category || null}, ${stock}, ${row.image_url || null})
+        `;
+        inserted++;
+      } catch (err) {
+        errors.push(`Qator ${idx + 2}: ${String(err)}`);
+      }
+    }
+
+    res.json({ success: true, inserted, total: rows.length, errors });
+  } catch (err) {
+    console.error("Bulk import error:", err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // 4. Admin: Delete a product
 router.delete("/admin/products/:id", requireAdmin, async (req, res) => {
   if (!sql) return res.status(500).json({ error: "Database not connected" });
@@ -544,6 +621,87 @@ router.get("/admin/customers/:id/orders", requireAdmin, async (req, res) => {
     `;
     res.json(data);
   } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// 4.7. Admin: Analytics dashboard data
+router.get("/admin/analytics", requireAdmin, async (_req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  try {
+    const [
+      totals,
+      statusCounts,
+      dailyRevenue,
+      topProducts,
+      todaySnapshot,
+      conversionData,
+    ] = await Promise.all([
+      sql`
+        SELECT
+          COUNT(*)::integer AS total_orders,
+          COALESCE(SUM(total_price), 0)::numeric AS total_revenue,
+          COUNT(DISTINCT customer_phone)::integer AS unique_customers
+        FROM orders
+        WHERE status != 'cancelled'
+      `,
+      sql`
+        SELECT status, COUNT(*)::integer AS count
+        FROM orders
+        GROUP BY status
+      `,
+      sql`
+        SELECT
+          DATE(created_at) AS day,
+          COALESCE(SUM(total_price), 0)::numeric AS revenue,
+          COUNT(*)::integer AS orders
+        FROM orders
+        WHERE created_at >= NOW() - INTERVAL '30 days' AND status != 'cancelled'
+        GROUP BY DATE(created_at)
+        ORDER BY day ASC
+      `,
+      sql`
+        SELECT
+          (item->>'product_id')::integer AS product_id,
+          (item->>'name') AS name,
+          SUM((item->>'quantity')::integer)::integer AS units_sold,
+          SUM((item->>'quantity')::integer * (item->>'price')::numeric)::numeric AS revenue
+        FROM orders, jsonb_array_elements(items) AS item
+        WHERE status != 'cancelled'
+        GROUP BY product_id, name
+        ORDER BY units_sold DESC
+        LIMIT 5
+      `,
+      sql`
+        SELECT
+          COALESCE(SUM(total_price) FILTER (WHERE DATE(created_at) = CURRENT_DATE AND status != 'cancelled'), 0)::numeric AS today_revenue,
+          COUNT(*) FILTER (WHERE DATE(created_at) = CURRENT_DATE)::integer AS today_orders,
+          COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days' AND status != 'cancelled')::integer AS week_orders
+        FROM orders
+      `,
+      sql`
+        SELECT
+          COUNT(DISTINCT COALESCE(telegram_id::text, web_session_id))::integer AS chat_users,
+          (SELECT COUNT(DISTINCT customer_phone)::integer FROM orders WHERE status != 'cancelled') AS buying_customers
+        FROM conversation_history
+      `,
+    ]);
+
+    const conv = conversionData[0] as any;
+    const conversionRate = conv?.chat_users > 0
+      ? Math.round((conv.buying_customers / conv.chat_users) * 100)
+      : 0;
+
+    res.json({
+      totals: totals[0],
+      statusCounts,
+      dailyRevenue,
+      topProducts,
+      today: todaySnapshot[0],
+      conversion: { chatUsers: conv?.chat_users || 0, buyingCustomers: conv?.buying_customers || 0, rate: conversionRate },
+    });
+  } catch (err) {
+    console.error("Analytics error:", err);
     res.status(500).json({ error: String(err) });
   }
 });
