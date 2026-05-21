@@ -141,11 +141,9 @@ export default function Chat() {
 
       const data = await res.json();
       const replyText = data.reply || "Kechirasiz, men tushuna olmadim.";
-
       const modelMessageId = (Date.now() + 1).toString();
-      setMessages(prev => [...prev, { id: modelMessageId, role: 'model', content: replyText }]);
 
-      // Request TTS 3.1 audio for the model reply
+      // Fetch TTS first (if enabled) so text + voice appear together
       let audioData = null;
       if (isAudioEnabled && replyText) {
           try {
@@ -155,10 +153,12 @@ export default function Chat() {
           }
       }
 
+      // Now reveal message and start audio in the same tick
+      setMessages(prev => [...prev, { id: modelMessageId, role: 'model', content: replyText }]);
       if (audioData) {
           playPCMBase64(audioData, modelMessageId);
       }
-      
+
     } catch (err: any) {
       console.error(err);
       setError("Kechirasiz, javob olishda xatolik yuz berdi. Iltimos qaytadan urinib ko'ring.");
