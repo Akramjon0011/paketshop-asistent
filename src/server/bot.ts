@@ -1,5 +1,5 @@
 import { Telegraf } from "telegraf";
-import { handleConversationalChat, generateSpeech, transcribeAudio } from './ai.js';
+import { handleConversationalChat, generateSpeech, transcribeAudio, BRAND } from './ai.js';
 import { sql } from './db.js';
 import { spawn } from 'child_process';
 
@@ -96,7 +96,7 @@ export function setupBot(app: any) {
   });
 
   bot.start(async (ctx) => {
-    const welcomeText = "Salom! Men Malika, Paketshop.uz'dan. Qanday yordam kerak?";
+    const welcomeText = `Salom! Men ${BRAND.assistantName}, ${BRAND.shopName}'dan. Qanday yordam kerak?`;
     await ctx.reply(welcomeText);
     try {
       await ctx.sendChatAction('record_voice');
@@ -109,7 +109,7 @@ export function setupBot(app: any) {
          } catch (oggErr) {
             console.warn("FFmpeg conversion failed on start, falling back to WAV audio player:", oggErr);
             const wavBuffer = pcmToWav(pcmBuffer);
-            await ctx.replyWithAudio({ source: wavBuffer, filename: 'welcome.wav' }, { title: 'Malika', performer: 'Paketshop' });
+            await ctx.replyWithAudio({ source: wavBuffer, filename: 'welcome.wav' }, { title: BRAND.assistantName, performer: BRAND.shopName });
          }
       }
     } catch (voiceErr) {
@@ -235,8 +235,8 @@ export function setupBot(app: any) {
                   const wavBuffer = pcmToWav(pcmBuffer);
                   await ctx.telegram.sendAudio(chatId, { source: wavBuffer, filename: 'voice.wav' }, {
                      ...replyOptions,
-                     title: 'Malika',
-                     performer: 'Paketshop'
+                     title: BRAND.assistantName,
+                     performer: BRAND.shopName
                   });
                }
             }

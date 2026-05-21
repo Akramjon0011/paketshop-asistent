@@ -1,7 +1,7 @@
 import express from 'express';
 import multer from 'multer';
 import { sql } from './db.js';
-import { generateEmbedding, searchKnowledgeBase, handleConversationalChat, transcribeAudio, generateSpeech } from './ai.js';
+import { generateEmbedding, searchKnowledgeBase, handleConversationalChat, transcribeAudio, generateSpeech, BRAND, BRAND_GREETING } from './ai.js';
 import { GoogleGenAI } from "@google/genai";
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -30,6 +30,17 @@ async function uploadToCloudinary(buffer: Buffer, folder: string): Promise<strin
 // Basic health check endpoint
 router.get("/health", (req, res) => {
   res.json({ status: "ok" });
+});
+
+// Public branding config — used by frontend to render shop name, assistant name, colors
+router.get("/config", (_req, res) => {
+  res.json({
+    shopName: BRAND.shopName,
+    assistantName: BRAND.assistantName,
+    greeting: BRAND_GREETING,
+    brandColor: BRAND.brandColor,
+    currency: BRAND.currency,
+  });
 });
 
 import jwt from 'jsonwebtoken';
@@ -132,6 +143,64 @@ router.post("/knowledge", requireAdmin, uploadImageMemory.single('image'), async
           VALUES (${question}, ${answer}, ${image_url}, ${video_url || null}) 
           RETURNING *
         `;
+    res.json(result[0]);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+router.put("/knowledge/:id", requireAdmin, uploadImageMemory.single('image'), async (req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  const { question, answer, video_url, remove_image } = req.body;
+  if (!question || !answer) return res.status(400).json({ error: "Missing fields" });
+
+  let image_url: string | null | undefined = undefined; // undefined = don't touch
+  if (req.file) {
+    if (!CLOUDINARY_CONFIGURED) {
+      return res.status(500).json({ error: "Rasm yuklash uchun Cloudinary sozlanmagan" });
+    }
+    try {
+      image_url = await uploadToCloudinary(req.file.buffer, 'paketshop');
+    } catch (err) {
+      console.error("Cloudinary upload failed:", err);
+      return res.status(500).json({ error: "Rasm yuklashda xatolik" });
+    }
+  } else if (remove_image === 'true') {
+    image_url = null;
+  }
+
+  try {
+    const embeddingText = `${question} ${answer}`;
+    const embedding = await generateEmbedding(embeddingText);
+    const vectorStr = embedding ? `[${embedding.join(',')}]` : null;
+
+    let result;
+    if (image_url === undefined) {
+      result = vectorStr
+        ? await sql`
+            UPDATE knowledge_base SET question = ${question}, answer = ${answer},
+              video_url = ${video_url || null}, embedding = ${vectorStr}::vector
+            WHERE id = ${req.params.id} RETURNING *
+          `
+        : await sql`
+            UPDATE knowledge_base SET question = ${question}, answer = ${answer},
+              video_url = ${video_url || null}
+            WHERE id = ${req.params.id} RETURNING *
+          `;
+    } else {
+      result = vectorStr
+        ? await sql`
+            UPDATE knowledge_base SET question = ${question}, answer = ${answer},
+              image_url = ${image_url}, video_url = ${video_url || null}, embedding = ${vectorStr}::vector
+            WHERE id = ${req.params.id} RETURNING *
+          `
+        : await sql`
+            UPDATE knowledge_base SET question = ${question}, answer = ${answer},
+              image_url = ${image_url}, video_url = ${video_url || null}
+            WHERE id = ${req.params.id} RETURNING *
+          `;
+    }
+    if (result.length === 0) return res.status(404).json({ error: "Topilmadi" });
     res.json(result[0]);
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -385,12 +454,95 @@ router.post("/admin/products", requireAdmin, uploadImageMemory.single('image'), 
   }
 });
 
+// 3.5. Admin: Update an existing product
+router.put("/admin/products/:id", requireAdmin, uploadImageMemory.single('image'), async (req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  const { name, description, price, category, stock, remove_image } = req.body;
+  if (!name || !price) return res.status(400).json({ error: "Name va Price majburiy" });
+
+  let image_url: string | null | undefined = undefined;
+  if (req.file) {
+    if (!CLOUDINARY_CONFIGURED) {
+      return res.status(500).json({ error: "Rasm yuklash uchun Cloudinary sozlanmagan" });
+    }
+    try {
+      image_url = await uploadToCloudinary(req.file.buffer, 'paketshop_products');
+    } catch (err) {
+      console.error("Cloudinary upload failed:", err);
+      return res.status(500).json({ error: "Rasm yuklashda xatolik" });
+    }
+  } else if (remove_image === 'true') {
+    image_url = null;
+  }
+
+  try {
+    const result = image_url === undefined
+      ? await sql`
+          UPDATE products SET name = ${name}, description = ${description || null},
+            price = ${price}, category = ${category || null}, stock = ${stock || 0}
+          WHERE id = ${req.params.id} RETURNING *
+        `
+      : await sql`
+          UPDATE products SET name = ${name}, description = ${description || null},
+            price = ${price}, category = ${category || null}, stock = ${stock || 0},
+            image_url = ${image_url}
+          WHERE id = ${req.params.id} RETURNING *
+        `;
+    if (result.length === 0) return res.status(404).json({ error: "Mahsulot topilmadi" });
+    res.json(result[0]);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // 4. Admin: Delete a product
 router.delete("/admin/products/:id", requireAdmin, async (req, res) => {
   if (!sql) return res.status(500).json({ error: "Database not connected" });
   try {
     await sql`DELETE FROM products WHERE id = ${req.params.id}`;
     res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// 4.5. Admin: List all customers with order counts and total spent
+router.get("/admin/customers", requireAdmin, async (_req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  try {
+    const data = await sql`
+      SELECT
+        c.id, c.telegram_id, c.web_session_id, c.name, c.phone, c.address, c.created_at,
+        COALESCE(o.order_count, 0)::integer as order_count,
+        COALESCE(o.total_spent, 0)::numeric as total_spent
+      FROM customers c
+      LEFT JOIN (
+        SELECT customer_phone,
+               COUNT(*) as order_count,
+               SUM(total_price) as total_spent
+        FROM orders
+        GROUP BY customer_phone
+      ) o ON o.customer_phone = c.phone
+      ORDER BY c.created_at DESC
+    `;
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// 4.6. Admin: Get one customer's order history
+router.get("/admin/customers/:id/orders", requireAdmin, async (req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  try {
+    const custRes = await sql`SELECT phone FROM customers WHERE id = ${req.params.id}`;
+    if (custRes.length === 0) return res.status(404).json({ error: "Topilmadi" });
+    const phone = custRes[0].phone;
+    if (!phone) return res.json([]);
+    const data = await sql`
+      SELECT * FROM orders WHERE customer_phone = ${phone} ORDER BY created_at DESC
+    `;
+    res.json(data);
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

@@ -1,7 +1,25 @@
 import { useState, useEffect } from 'react';
-import { Shield, Key, Plus, Trash2, Database, AlertCircle, Loader2, Package, ShoppingBag, Eye, CheckCircle, Clock, Truck, XCircle } from 'lucide-react';
+import { Shield, Key, Plus, Trash2, Database, AlertCircle, Loader2, Package, ShoppingBag, Eye, CheckCircle, Clock, Truck, XCircle, Pencil, X, Users } from 'lucide-react';
 
-type Tab = 'knowledge' | 'products' | 'orders';
+type Tab = 'knowledge' | 'products' | 'orders' | 'customers';
+
+type EditingProduct = {
+  id: number;
+  name: string;
+  description: string;
+  price: string;
+  category: string;
+  stock: string;
+  image_url: string | null;
+} | null;
+
+type EditingKnowledge = {
+  id: number;
+  question: string;
+  answer: string;
+  video_url: string;
+  image_url: string | null;
+} | null;
 
 export default function Admin() {
   const [password, setPassword] = useState('');
@@ -26,6 +44,13 @@ export default function Admin() {
 
   // --- Orders State ---
   const [orders, setOrders] = useState<any[]>([]);
+
+  // --- Customers State ---
+  const [customers, setCustomers] = useState<any[]>([]);
+
+  // --- Edit Modal State ---
+  const [editingProduct, setEditingProduct] = useState<EditingProduct>(null);
+  const [editingKnowledge, setEditingKnowledge] = useState<EditingKnowledge>(null);
 
   // --- Global Loading/Error State ---
   const [isLoading, setIsLoading] = useState(false);
@@ -77,6 +102,16 @@ export default function Admin() {
           setOrders(data);
         } else {
           setError('Buyurtmalar ro\'yxatini yuklab bo\'lmadi');
+        }
+      } else if (activeTab === 'customers') {
+        const res = await fetch('/api/admin/customers', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setCustomers(data);
+        } else {
+          setError('Mijozlar ro\'yxatini yuklab bo\'lmadi');
         }
       }
     } catch (err) {
@@ -242,6 +277,68 @@ export default function Admin() {
     }
   };
 
+  const handleSaveProductEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingProduct) return;
+    setIsLoading(true);
+    try {
+      const formData = new FormData();
+      formData.append('name', editingProduct.name);
+      formData.append('description', editingProduct.description);
+      formData.append('price', editingProduct.price);
+      formData.append('category', editingProduct.category);
+      formData.append('stock', editingProduct.stock);
+      const fileInput = (e.target as HTMLFormElement).elements.namedItem('imageFile') as HTMLInputElement;
+      if (fileInput?.files?.[0]) formData.append('image', fileInput.files[0]);
+
+      const res = await fetch(`/api/admin/products/${editingProduct.id}`, {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${token}` },
+        body: formData
+      });
+      if (res.ok) {
+        setEditingProduct(null);
+        fetchData();
+      } else {
+        setError('Saqlashda xatolik');
+      }
+    } catch (err) {
+      setError('Tarmoq xatosi');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSaveKnowledgeEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingKnowledge) return;
+    setIsLoading(true);
+    try {
+      const formData = new FormData();
+      formData.append('question', editingKnowledge.question);
+      formData.append('answer', editingKnowledge.answer);
+      formData.append('video_url', editingKnowledge.video_url || '');
+      const fileInput = (e.target as HTMLFormElement).elements.namedItem('imageFile') as HTMLInputElement;
+      if (fileInput?.files?.[0]) formData.append('image', fileInput.files[0]);
+
+      const res = await fetch(`/api/knowledge/${editingKnowledge.id}`, {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${token}` },
+        body: formData
+      });
+      if (res.ok) {
+        setEditingKnowledge(null);
+        fetchData();
+      } else {
+        setError('Saqlashda xatolik');
+      }
+    } catch (err) {
+      setError('Tarmoq xatosi');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   // --- Order Actions ---
   const handleUpdateOrderStatus = async (id: number, newStatus: string) => {
     try {
@@ -390,6 +487,14 @@ export default function Admin() {
             }`}
           >
             <ShoppingBag className="w-4 h-4" /> Kelgan Buyurtmalar
+          </button>
+          <button
+            onClick={() => setActiveTab('customers')}
+            className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-bold transition-all relative ${
+              activeTab === 'customers' ? 'bg-amber-500 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            <Users className="w-4 h-4" /> Mijozlar
           </button>
         </div>
 
@@ -564,13 +669,28 @@ export default function Admin() {
                               <span>Sana: {new Date(item.created_at).toLocaleDateString()}</span>
                             </div>
                           </div>
-                          <button
-                            onClick={() => handleDeleteKnowledge(item.id)}
-                            className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all"
-                            title="O'chirish"
-                          >
-                            <Trash2 className="w-5 h-5" />
-                          </button>
+                          <div className="flex flex-col gap-1">
+                            <button
+                              onClick={() => setEditingKnowledge({
+                                id: item.id,
+                                question: item.question,
+                                answer: item.answer,
+                                video_url: item.video_url || '',
+                                image_url: item.image_url
+                              })}
+                              className="p-2 text-gray-400 hover:text-amber-600 hover:bg-amber-50 rounded-xl transition-all"
+                              title="Tahrirlash"
+                            >
+                              <Pencil className="w-5 h-5" />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteKnowledge(item.id)}
+                              className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all"
+                              title="O'chirish"
+                            >
+                              <Trash2 className="w-5 h-5" />
+                            </button>
+                          </div>
                         </div>
                       </div>
                     ))
@@ -721,6 +841,21 @@ export default function Admin() {
                             </span>
                           </div>
                           <button
+                            onClick={() => setEditingProduct({
+                              id: item.id,
+                              name: item.name,
+                              description: item.description || '',
+                              price: String(item.price),
+                              category: item.category || '',
+                              stock: String(item.stock || 0),
+                              image_url: item.image_url
+                            })}
+                            className="p-2 text-gray-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition-all"
+                            title="Tahrirlash"
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                          <button
                             onClick={() => handleDeleteProduct(item.id)}
                             className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
                             title="O'chirish"
@@ -851,7 +986,204 @@ export default function Admin() {
           </div>
         )}
 
+        {/* --- TAB 4: CUSTOMERS --- */}
+        {activeTab === 'customers' && (
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden animate-fadeIn">
+            <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+              <div>
+                <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                  <Users className="w-5 h-5 text-amber-500" /> Mijozlar bazasi
+                </h2>
+                <p className="text-xs text-gray-500 font-medium">AI bilan suhbat qilgan va buyurtma bergan mijozlar ro'yxati</p>
+              </div>
+              <span className="bg-amber-100 text-amber-800 text-xs font-bold px-3 py-1 rounded-full border border-amber-200">
+                Jami: {customers.length} ta
+              </span>
+            </div>
+            <div className="divide-y divide-gray-100 max-h-[700px] overflow-y-auto">
+              {isLoading && customers.length === 0 ? (
+                <div className="p-12 flex justify-center text-amber-500">
+                  <Loader2 className="w-8 h-8 animate-spin" />
+                </div>
+              ) : customers.length === 0 ? (
+                <div className="p-16 text-center text-gray-500 flex flex-col items-center justify-center">
+                  <Users className="w-16 h-16 text-gray-300 mb-4" />
+                  <h3 className="text-lg font-bold text-gray-800">Hozircha mijozlar yo'q.</h3>
+                  <p className="text-sm text-gray-400 max-w-sm mt-1">Buyurtma bergan mijozlar avtomatik ravishda shu yerda paydo bo'ladi.</p>
+                </div>
+              ) : (
+                customers.map((cust) => (
+                  <div key={cust.id} className="p-6 hover:bg-gray-50 transition-colors">
+                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                      <div className="flex-1 grid grid-cols-1 md:grid-cols-4 gap-4 text-sm">
+                        <div>
+                          <span className="text-[10px] font-bold text-gray-400 block uppercase">Ism</span>
+                          <span className="font-bold text-gray-800">{cust.name || '—'}</span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] font-bold text-gray-400 block uppercase">Telefon</span>
+                          {cust.phone ? (
+                            <a href={`tel:${cust.phone}`} className="font-bold text-amber-600 hover:underline">{cust.phone}</a>
+                          ) : <span className="text-gray-400">—</span>}
+                        </div>
+                        <div>
+                          <span className="text-[10px] font-bold text-gray-400 block uppercase">Manzil</span>
+                          <span className="font-medium text-gray-700 line-clamp-1">{cust.address || '—'}</span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] font-bold text-gray-400 block uppercase">Manba</span>
+                          <span className="font-medium text-gray-700">
+                            {cust.telegram_id ? `Telegram (${cust.telegram_id})` : 'Web'}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-4 shrink-0">
+                        <div className="text-center">
+                          <span className="text-[10px] font-bold text-gray-400 block uppercase">Buyurtmalar</span>
+                          <span className="text-lg font-extrabold text-gray-900">{cust.order_count}</span>
+                        </div>
+                        <div className="text-center">
+                          <span className="text-[10px] font-bold text-gray-400 block uppercase">Jami xarid</span>
+                          <span className="text-base font-extrabold text-amber-600">{Number(cust.total_spent).toLocaleString()} so'm</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
       </div>
+
+      {/* --- EDIT PRODUCT MODAL --- */}
+      {editingProduct && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50 animate-fadeIn">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+            <div className="p-6 border-b border-gray-100 flex justify-between items-center">
+              <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                <Pencil className="w-5 h-5 text-amber-500" /> Mahsulotni tahrirlash
+              </h2>
+              <button onClick={() => setEditingProduct(null)} className="p-2 text-gray-400 hover:text-gray-600 rounded-lg">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveProductEdit} className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-1">Nomi</label>
+                <input type="text" value={editingProduct.name}
+                  onChange={(e) => setEditingProduct({ ...editingProduct, name: e.target.value })}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2.5 focus:ring-amber-500 focus:border-amber-500 text-gray-900 bg-white" required />
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-1">Narxi</label>
+                <input type="number" value={editingProduct.price}
+                  onChange={(e) => setEditingProduct({ ...editingProduct, price: e.target.value })}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-gray-900 bg-white" required />
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-1">Tavsifi</label>
+                <textarea value={editingProduct.description}
+                  onChange={(e) => setEditingProduct({ ...editingProduct, description: e.target.value })}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-gray-900 bg-white" rows={3} />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 mb-1">Kategoriya</label>
+                  <input type="text" value={editingProduct.category}
+                    onChange={(e) => setEditingProduct({ ...editingProduct, category: e.target.value })}
+                    className="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-gray-900 bg-white" />
+                </div>
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 mb-1">Soni</label>
+                  <input type="number" value={editingProduct.stock}
+                    onChange={(e) => setEditingProduct({ ...editingProduct, stock: e.target.value })}
+                    className="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-gray-900 bg-white" min="0" />
+                </div>
+              </div>
+              {editingProduct.image_url && (
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 mb-1">Joriy rasm</label>
+                  <img src={editingProduct.image_url} alt="" className="h-24 rounded-lg" />
+                </div>
+              )}
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-1">Yangi rasm (ixtiyoriy)</label>
+                <input type="file" name="imageFile" accept="image/*"
+                  className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-amber-50 file:text-amber-700" />
+              </div>
+              <div className="flex gap-2 pt-2">
+                <button type="button" onClick={() => setEditingProduct(null)}
+                  className="flex-1 py-3 text-sm font-bold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-xl">
+                  Bekor qilish
+                </button>
+                <button type="submit" disabled={isLoading}
+                  className="flex-1 py-3 text-sm font-bold text-white bg-amber-500 hover:bg-amber-600 rounded-xl disabled:opacity-50 flex items-center justify-center">
+                  {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : 'Saqlash'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* --- EDIT KNOWLEDGE MODAL --- */}
+      {editingKnowledge && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50 animate-fadeIn">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+            <div className="p-6 border-b border-gray-100 flex justify-between items-center">
+              <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                <Pencil className="w-5 h-5 text-amber-500" /> Ma'lumotni tahrirlash
+              </h2>
+              <button onClick={() => setEditingKnowledge(null)} className="p-2 text-gray-400 hover:text-gray-600 rounded-lg">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveKnowledgeEdit} className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-1">Savol / Mavzu</label>
+                <textarea value={editingKnowledge.question}
+                  onChange={(e) => setEditingKnowledge({ ...editingKnowledge, question: e.target.value })}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-gray-900 bg-white" rows={2} required />
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-1">Javob</label>
+                <textarea value={editingKnowledge.answer}
+                  onChange={(e) => setEditingKnowledge({ ...editingKnowledge, answer: e.target.value })}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-gray-900 bg-white" rows={5} required />
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-1">Video URL</label>
+                <input type="url" value={editingKnowledge.video_url}
+                  onChange={(e) => setEditingKnowledge({ ...editingKnowledge, video_url: e.target.value })}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-gray-900 bg-white" />
+              </div>
+              {editingKnowledge.image_url && (
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 mb-1">Joriy rasm</label>
+                  <img src={editingKnowledge.image_url} alt="" className="h-24 rounded-lg" />
+                </div>
+              )}
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-1">Yangi rasm (ixtiyoriy)</label>
+                <input type="file" name="imageFile" accept="image/*"
+                  className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-amber-50 file:text-amber-700" />
+              </div>
+              <div className="flex gap-2 pt-2">
+                <button type="button" onClick={() => setEditingKnowledge(null)}
+                  className="flex-1 py-3 text-sm font-bold text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-xl">
+                  Bekor qilish
+                </button>
+                <button type="submit" disabled={isLoading}
+                  className="flex-1 py-3 text-sm font-bold text-white bg-amber-500 hover:bg-amber-600 rounded-xl disabled:opacity-50 flex items-center justify-center">
+                  {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : 'Saqlash'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

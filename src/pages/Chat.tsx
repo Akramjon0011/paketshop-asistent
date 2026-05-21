@@ -21,13 +21,26 @@ function getAudioContext() {
   return globalAudioCtx;
 }
 
+type BrandConfig = {
+  shopName: string;
+  assistantName: string;
+  greeting: string;
+  brandColor: string;
+  currency: string;
+};
+
+const DEFAULT_BRAND: BrandConfig = {
+  shopName: "Paketshop.uz",
+  assistantName: "Malika",
+  greeting: "Salom! Sizga qanday yordam bera olaman?",
+  brandColor: "amber",
+  currency: "so'm",
+};
+
 export default function Chat() {
+  const [brand, setBrand] = useState<BrandConfig>(DEFAULT_BRAND);
   const [messages, setMessages] = useState<Message[]>([
-    {
-      id: '1',
-      role: 'model',
-      content: "Salom! Men Malika, Paketshop.uz do'konidanman. Sizga mahsulotlarimizni ko'rsatishim yoki buyurtma berishda yordamlashishim mumkin. Qanday yordam bera olaman?"
-    }
+    { id: '1', role: 'model', content: DEFAULT_BRAND.greeting }
   ]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -35,6 +48,19 @@ export default function Chat() {
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
   const [webSessionId, setWebSessionId] = useState('');
   const [isRecording, setIsRecording] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/config')
+      .then(r => r.ok ? r.json() : null)
+      .then((cfg: BrandConfig | null) => {
+        if (!cfg) return;
+        setBrand(cfg);
+        setMessages(prev => prev.length === 1 && prev[0].id === '1'
+          ? [{ id: '1', role: 'model', content: cfg.greeting }]
+          : prev);
+      })
+      .catch(() => { /* keep defaults */ });
+  }, []);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -290,9 +316,9 @@ export default function Chat() {
               <Package className="w-6 h-6" />
             </div>
             <div>
-              <h1 className="text-xl font-bold tracking-tight">Paketshop.uz</h1>
+              <h1 className="text-xl font-bold tracking-tight">{brand.shopName}</h1>
               <p className="text-amber-100 text-sm flex items-center">
-                <Sparkles className="w-3 h-3 mr-1" /> Malika (Raqamli yordamchi)
+                <Sparkles className="w-3 h-3 mr-1" /> {brand.assistantName} (Raqamli yordamchi)
               </p>
             </div>
           </div>
@@ -383,7 +409,7 @@ export default function Chat() {
                   handleSubmit(e);
                 }
               }}
-              placeholder={isRecording ? "Ovoz yozilmoqda... To'xtatish uchun qizil tugmani bosing." : "Malikaga xabar yozing (ovoz bilan javob beradi)..."}
+              placeholder={isRecording ? "Ovoz yozilmoqda... To'xtatish uchun qizil tugmani bosing." : `${brand.assistantName}ga xabar yozing (ovoz bilan javob beradi)...`}
               disabled={isRecording}
               className="flex-1 max-h-32 min-h-[56px] resize-none bg-gray-50 border border-gray-300 rounded-xl px-4 py-3 sm:py-4 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500 transition-all text-sm sm:text-base text-gray-900 placeholder:text-gray-400 m-0 disabled:bg-gray-100 disabled:text-gray-400"
               rows={1}
@@ -417,7 +443,7 @@ export default function Chat() {
             </button>
           </form>
           <div className="text-center text-xs text-gray-400 pt-2 flex flex-col sm:flex-row justify-center items-center gap-1">
-            <span>Paketshop.uz sun'iy intellekt yordamchisi. Ayrim javoblarda noaniqliklar bo'lishi mumkin.</span>
+            <span>{brand.shopName} sun'iy intellekt yordamchisi. Ayrim javoblarda noaniqliklar bo'lishi mumkin.</span>
           </div>
         </div>
       </footer>
