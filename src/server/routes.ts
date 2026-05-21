@@ -1,18 +1,31 @@
 import express from 'express';
 import multer from 'multer';
-import path from 'path';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
 import { sql } from './db.js';
-import { generateEmbedding, searchKnowledgeBase } from './ai.js';
+import { generateEmbedding, searchKnowledgeBase, handleConversationalChat, transcribeAudio, generateSpeech } from './ai.js';
 import { GoogleGenAI } from "@google/genai";
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 
-const __filename = fileURLToPath(import.meta.url);
-const projectRoot = path.join(path.dirname(__filename), '../..');
-
 export const router = express.Router();
+
+const CLOUDINARY_CONFIGURED = !!(
+  process.env.CLOUDINARY_CLOUD_NAME &&
+  process.env.CLOUDINARY_API_KEY &&
+  process.env.CLOUDINARY_API_SECRET
+);
+
+async function uploadToCloudinary(buffer: Buffer, folder: string): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      { folder },
+      (error, result) => {
+        if (error || !result) reject(error || new Error("No upload result"));
+        else resolve(result.secure_url);
+      }
+    );
+    uploadStream.end(buffer);
+  });
+}
 
 // Basic health check endpoint
 router.get("/health", (req, res) => {
@@ -30,33 +43,30 @@ const apiLimiter = rateLimit({
 
 router.use(apiLimiter);
 
-// Admin Authentication Middleware
+const JWT_SECRET = process.env.JWT_SECRET || process.env.ADMIN_PASSWORD;
+if (!process.env.JWT_SECRET) {
+  console.warn("⚠️  JWT_SECRET env o'rnatilmagan. ADMIN_PASSWORD ishlatilyapti (xavfsiz emas). .env ga JWT_SECRET qo'shing.");
+}
+
 const requireAdmin = (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.split(' ')[1];
     try {
-      jwt.verify(token, process.env.ADMIN_PASSWORD as string);
+      jwt.verify(token, JWT_SECRET as string);
       next();
     } catch (err) {
       res.status(401).json({ error: "Yaroqsiz yoki muddati tugagan token" });
     }
   } else {
-    // Fallback checking for backward compatibility
-    const password = req.headers['x-admin-password'];
-    if (password === process.env.ADMIN_PASSWORD) {
-      next();
-    } else {
-      res.status(401).json({ error: "Ruxsat etilmagan (Unauthorized)" });
-    }
+    res.status(401).json({ error: "Ruxsat etilmagan (Unauthorized)" });
   }
 };
 
-// Admin APIs
 router.post("/admin/login", (req, res) => {
   const { password } = req.body;
   if (password === process.env.ADMIN_PASSWORD) {
-    const token = jwt.sign({ role: 'admin' }, process.env.ADMIN_PASSWORD as string, { expiresIn: '24h' });
+    const token = jwt.sign({ role: 'admin' }, JWT_SECRET as string, { expiresIn: '24h' });
     res.json({ success: true, token });
   } else {
     res.status(401).json({ error: "Noto'g'ri parol" });
@@ -94,34 +104,14 @@ router.post("/knowledge", requireAdmin, uploadImageMemory.single('image'), async
   
   let image_url = null;
   if (req.file) {
-    if (process.env.CLOUDINARY_CLOUD_NAME) {
-      // Upload to Cloudinary
-      try {
-          const uploadResult = await new Promise<any>((resolve, reject) => {
-            const uploadStream = cloudinary.uploader.upload_stream(
-              { folder: 'paketshop' },
-              (error, result) => {
-                if (error) reject(error);
-                else resolve(result);
-              }
-            );
-            uploadStream.end(req.file!.buffer);
-          });
-          image_url = uploadResult.secure_url;
-      } catch (err) {
-          console.error("Cloudinary upload failed:", err);
-          return res.status(500).json({ error: "Rasm yuklashda xatolik yuz berdi" });
-      }
-    } else {
-      // Fallback local upload
-      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-      const filename = uniqueSuffix + path.extname(req.file.originalname);
-      const dir = path.join(projectRoot, 'public', 'uploads');
-      if (!fs.existsSync(dir)){
-          fs.mkdirSync(dir, { recursive: true });
-      }
-      fs.writeFileSync(path.join(dir, filename), req.file.buffer);
-      image_url = `/uploads/${filename}`;
+    if (!CLOUDINARY_CONFIGURED) {
+      return res.status(500).json({ error: "Rasm yuklash uchun Cloudinary sozlanmagan. CLOUDINARY_* env'larni qo'shing." });
+    }
+    try {
+      image_url = await uploadToCloudinary(req.file.buffer, 'paketshop');
+    } catch (err) {
+      console.error("Cloudinary upload failed:", err);
+      return res.status(500).json({ error: "Rasm yuklashda xatolik yuz berdi" });
     }
   }
 
@@ -265,6 +255,169 @@ router.post("/knowledge/reindex", requireAdmin, async (req, res) => {
     res.json({ success: true, total: data.length, updated });
   } catch (err) {
     console.error("Reindex error:", err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// --- Conversational Commerce Routes ---
+
+// 1. Chat with Malika (Conversational E-Commerce)
+router.post("/chat", async (req, res) => {
+  const { message, history, webSessionId } = req.body;
+  if (!message) return res.status(400).json({ error: "Xabar majburiy" });
+  try {
+    const replyText = await handleConversationalChat(message, history || [], { webSessionId });
+    res.json({ reply: replyText });
+  } catch (err) {
+    console.error("Chat error:", err);
+    res.status(500).json({ error: "Tizimda xatolik yuz berdi" });
+  }
+});
+
+// 1.1. Reset conversation for a web session
+router.post("/chat/reset", async (req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  const { webSessionId } = req.body;
+  if (!webSessionId) return res.status(400).json({ error: "webSessionId required" });
+  try {
+    await sql`DELETE FROM conversation_history WHERE web_session_id = ${webSessionId}`;
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// 1.5. Voice Chat with Malika
+router.post("/chat/voice", uploadMemory.single('audio'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: "Audio fayl yuborilmadi" });
+  }
+  
+  const { webSessionId } = req.body;
+  let history: any[] = [];
+  if (req.body.history) {
+    try {
+      history = JSON.parse(req.body.history);
+    } catch (e) {
+      console.warn("Failed to parse history in voice chat route", e);
+    }
+  }
+
+  try {
+    // 1. Transcribe audio to text
+    const mimeType = req.file.mimetype || 'audio/webm';
+    console.log(`🎙️ Web voice message upload received: size=${req.file.size} bytes, mime=${mimeType}`);
+    
+    const transcribedText = await transcribeAudio(req.file.buffer, mimeType);
+    if (!transcribedText) {
+      return res.status(400).json({ error: "Ovozli xabarni eshitib bo'lmadi. Iltimos qaytadan yozib ko'ring." });
+    }
+    
+    console.log(`🎙️ Transcribed voice to: "${transcribedText}"`);
+
+    // 2. Feed text into conversational chat
+    const replyText = await handleConversationalChat(transcribedText, history, { webSessionId });
+
+    // 3. Clean and convert reply text to TTS audio
+    const speechText = replyText
+      .replace(/\[IMAGE: (.*?)\]/g, '')
+      .replace(/\[VIDEO: (.*?)\]/g, '')
+      .replace(/https?:\/\/[^\s]+/g, '') // remove URLs
+      .replace(/[#_*\[\]]/g, '')        // remove styling characters
+      .trim();
+
+    let voiceBase64 = null;
+    if (speechText) {
+      voiceBase64 = await generateSpeech(speechText);
+    }
+
+    res.json({
+      transcription: transcribedText,
+      reply: replyText,
+      audio: voiceBase64 // Base64 PCM data
+    });
+
+  } catch (err) {
+    console.error("Voice chat route error:", err);
+    res.status(500).json({ error: "Ovozli xabarni ishlashda xatolik yuz berdi" });
+  }
+});
+
+// 2. Admin: List all products
+router.get("/admin/products", requireAdmin, async (req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  try {
+    const data = await sql`SELECT * FROM products ORDER BY created_at DESC`;
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// 3. Admin: Create a new product
+router.post("/admin/products", requireAdmin, uploadImageMemory.single('image'), async (req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  const { name, description, price, category, stock } = req.body;
+  if (!name || !price) return res.status(400).json({ error: "Name and Price are required" });
+
+  let image_url = null;
+  if (req.file) {
+    if (!CLOUDINARY_CONFIGURED) {
+      return res.status(500).json({ error: "Rasm yuklash uchun Cloudinary sozlanmagan. CLOUDINARY_* env'larni qo'shing." });
+    }
+    try {
+      image_url = await uploadToCloudinary(req.file.buffer, 'paketshop_products');
+    } catch (err) {
+      console.error("Cloudinary upload failed:", err);
+      return res.status(500).json({ error: "Rasm yuklashda xatolik yuz berdi" });
+    }
+  }
+
+  try {
+    const result = await sql`
+      INSERT INTO products (name, description, price, category, stock, image_url)
+      VALUES (${name}, ${description || null}, ${price}, ${category || null}, ${stock || 10}, ${image_url})
+      RETURNING *
+    `;
+    res.json(result[0]);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// 4. Admin: Delete a product
+router.delete("/admin/products/:id", requireAdmin, async (req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  try {
+    await sql`DELETE FROM products WHERE id = ${req.params.id}`;
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// 5. Admin: List all orders
+router.get("/admin/orders", requireAdmin, async (req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  try {
+    const data = await sql`SELECT * FROM orders ORDER BY created_at DESC`;
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// 6. Admin: Update order status
+router.patch("/admin/orders/:id", requireAdmin, async (req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  const { status } = req.body;
+  if (!status) return res.status(400).json({ error: "Status is required" });
+  try {
+    const result = await sql`
+      UPDATE orders SET status = ${status} WHERE id = ${req.params.id} RETURNING *
+    `;
+    res.json(result[0]);
+  } catch (err) {
     res.status(500).json({ error: String(err) });
   }
 });

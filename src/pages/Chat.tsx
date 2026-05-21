@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Send, User, Package, Loader2, Sparkles, Volume2, VolumeX } from 'lucide-react';
-import { createChat, generateSpeech } from '../services/geminiService';
+import { Send, User, Package, Loader2, Sparkles, Volume2, VolumeX, Mic, Square } from 'lucide-react';
+import { generateSpeech } from '../services/geminiService';
 
 type Message = {
   id: string;
@@ -26,26 +26,27 @@ export default function Chat() {
     {
       id: '1',
       role: 'model',
-      content: "Salom! Men Malika, Paketshop.uz'dan. Qanday yordam kerak?"
+      content: "Salom! Men Malika, Paketshop.uz do'konidanman. Sizga mahsulotlarimizni ko'rsatishim yoki buyurtma berishda yordamlashishim mumkin. Qanday yordam bera olaman?"
     }
   ]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [webSessionId, setWebSessionId] = useState('');
+  const [isRecording, setIsRecording] = useState(false);
   
-  const chatRef = useRef<any>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
-    async function initChat() {
-      try {
-        chatRef.current = await createChat();
-      } catch (err: any) {
-        console.error("Chat info xatolik: ", err);
-      }
+    let id = localStorage.getItem('webSessionId');
+    if (!id) {
+      id = 'session_' + Math.random().toString(36).substring(2, 15) + '_' + Date.now();
+      localStorage.setItem('webSessionId', id);
     }
-    initChat();
+    setWebSessionId(id);
   }, []);
 
   const scrollToBottom = () => {
@@ -109,15 +110,6 @@ export default function Chat() {
     e.preventDefault();
     if (!input.trim() || isLoading) return;
 
-    if (!chatRef.current) {
-        try {
-            chatRef.current = await createChat();
-        } catch {
-            setError('Tizim bilan ulanib bo\'lmadi.');
-            return;
-        }
-    }
-
     const userMessage: Message = { id: Date.now().toString(), role: 'user', content: input.trim() };
     setMessages(prev => [...prev, userMessage]);
     setInput('');
@@ -126,58 +118,42 @@ export default function Chat() {
     stopCurrentAudio(); // Stop audio if user types a new message
 
     try {
-      // 1. Fetch RAG Context
-      let ragContext = "";
-      try {
-        const res = await fetch('/api/knowledge/search', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: userMessage.content })
-        });
-        if (res.ok) {
-          const data = await res.json();
-          ragContext = data.context || "";
-        }
-      } catch (e) {
-        console.error("RAG search error", e);
-      }
+      // Map current chat history for backend (clean role and content structure)
+      const chatHistory = messages.map(m => ({
+        role: m.role,
+        content: m.content
+      }));
 
-      // 2. Enhance message with context
-      const enhancedMessage = ragContext 
-        ? `${userMessage.content}\n\n---\nQo'shimcha kontekst:\n${ragContext}` 
-        : userMessage.content;
-
-      // 3. Stream response
-      const responseStream = await chatRef.current.sendMessageStream({
-          message: enhancedMessage
+      // Call our backend API instead of calling Google GenAI directly from client
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: userMessage.content,
+          history: chatHistory,
+          webSessionId: webSessionId
+        })
       });
-      
-      const modelMessageId = (Date.now() + 1).toString();
-      setMessages(prev => [...prev, { id: modelMessageId, role: 'model', content: '' }]);
 
-      let fullResponseText = "";
-      for await (const chunk of responseStream) {
-        if (chunk.text) {
-          fullResponseText += chunk.text;
-        }
+      if (!res.ok) {
+        throw new Error("Tizim bilan ulanib bo'lmadi.");
       }
-      
+
+      const data = await res.json();
+      const replyText = data.reply || "Kechirasiz, men tushuna olmadim.";
+
+      const modelMessageId = (Date.now() + 1).toString();
+      setMessages(prev => [...prev, { id: modelMessageId, role: 'model', content: replyText }]);
+
+      // Request TTS 3.1 audio for the model reply
       let audioData = null;
-      // Request TTS 3.1 audio after text stream completes
-      if (isAudioEnabled && fullResponseText) {
+      if (isAudioEnabled && replyText) {
           try {
-              audioData = await generateSpeech(fullResponseText);
+              audioData = await generateSpeech(replyText);
           } catch(err) {
               console.error("TTS generation failed: ", err);
           }
       }
-
-      // Now update the UI with the final text all at once
-      setMessages(prev => prev.map(msg => 
-        msg.id === modelMessageId 
-          ? { ...msg, content: fullResponseText }
-          : msg
-      ));
 
       if (audioData) {
           playPCMBase64(audioData, modelMessageId);
@@ -186,6 +162,105 @@ export default function Chat() {
     } catch (err: any) {
       console.error(err);
       setError("Kechirasiz, javob olishda xatolik yuz berdi. Iltimos qaytadan urinib ko'ring.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const startRecording = async () => {
+    try {
+      stopCurrentAudio();
+      setError(null);
+      
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        
+        // Stop all audio tracks in stream
+        stream.getTracks().forEach(track => track.stop());
+
+        // Process audio upload
+        await handleAudioUpload(audioBlob);
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+    } catch (err) {
+      console.error("Mic access denied or error:", err);
+      setError("Mikrofondan foydalanishga ruxsat berilmadi yoki xatolik yuz berdi.");
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
+  };
+
+  const handleAudioUpload = async (audioBlob: Blob) => {
+    setIsLoading(true);
+    setError(null);
+    stopCurrentAudio();
+
+    // Map history
+    const chatHistory = messages.map(m => ({
+      role: m.role,
+      content: m.content
+    }));
+
+    const formData = new FormData();
+    formData.append('audio', audioBlob, 'voice.webm');
+    formData.append('webSessionId', webSessionId);
+    formData.append('history', JSON.stringify(chatHistory));
+
+    try {
+      const res = await fetch('/api/chat/voice', {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!res.ok) {
+        throw new Error("Ovozli xabarni yuborib bo'lmadi.");
+      }
+
+      const data = await res.json();
+      
+      // Add transcription to chat history as user message
+      const userMessageId = Date.now().toString();
+      const userMessage: Message = {
+        id: userMessageId,
+        role: 'user',
+        content: data.transcription || "[Ovozli xabar]"
+      };
+
+      // Add response to chat history
+      const modelMessageId = (Date.now() + 1).toString();
+      const replyText = data.reply || "Kechirasiz, men tushuna olmadim.";
+      
+      setMessages(prev => [
+        ...prev,
+        userMessage,
+        { id: modelMessageId, role: 'model', content: replyText }
+      ]);
+
+      // Play returning TTS audio if enabled
+      if (isAudioEnabled && data.audio) {
+        playPCMBase64(data.audio, modelMessageId);
+      }
+    } catch (err: any) {
+      console.error(err);
+      setError("Ovozli xabarni qayta ishlashda xatolik yuz berdi.");
     } finally {
       setIsLoading(false);
     }
@@ -308,14 +383,35 @@ export default function Chat() {
                   handleSubmit(e);
                 }
               }}
-              placeholder="Malikaga xabar yozing (ovoz bilan javob beradi)..."
-              className="flex-1 max-h-32 min-h-[56px] resize-none bg-gray-50 border border-gray-300 rounded-xl px-4 py-3 sm:py-4 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500 transition-all text-sm sm:text-base text-gray-900 placeholder:text-gray-400 m-0"
+              placeholder={isRecording ? "Ovoz yozilmoqda... To'xtatish uchun qizil tugmani bosing." : "Malikaga xabar yozing (ovoz bilan javob beradi)..."}
+              disabled={isRecording}
+              className="flex-1 max-h-32 min-h-[56px] resize-none bg-gray-50 border border-gray-300 rounded-xl px-4 py-3 sm:py-4 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500 transition-all text-sm sm:text-base text-gray-900 placeholder:text-gray-400 m-0 disabled:bg-gray-100 disabled:text-gray-400"
               rows={1}
             />
+            {isRecording ? (
+              <button
+                type="button"
+                onClick={stopRecording}
+                className="bg-red-500 hover:bg-red-600 text-white rounded-xl p-3 sm:p-4 transition-colors flex-shrink-0 flex items-center justify-center flex-col h-[56px] w-[56px] animate-pulse shadow-md"
+                title="Yozishni to'xtatish va yuborish"
+              >
+                <Square className="w-5 h-5 sm:w-6 sm:h-6" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={startRecording}
+                disabled={isLoading}
+                className="bg-amber-100 hover:bg-amber-200 text-amber-600 rounded-xl p-3 sm:p-4 transition-colors flex-shrink-0 flex items-center justify-center flex-col h-[56px] w-[56px] disabled:opacity-50 shadow-sm"
+                title="Ovozli xabar yuborish"
+              >
+                <Mic className="w-5 h-5 sm:w-6 sm:h-6" />
+              </button>
+            )}
             <button
               type="submit"
-              disabled={!input.trim() || isLoading}
-              className="bg-amber-500 hover:bg-amber-600 disabled:opacity-50 disabled:hover:bg-amber-500 text-white rounded-xl p-3 sm:p-4 transition-colors flex-shrink-0 flex items-center justify-center flex-col h-[56px] w-[56px]"
+              disabled={!input.trim() || isLoading || isRecording}
+              className="bg-amber-500 hover:bg-amber-600 disabled:opacity-50 disabled:hover:bg-amber-500 text-white rounded-xl p-3 sm:p-4 transition-colors flex-shrink-0 flex items-center justify-center flex-col h-[56px] w-[56px] shadow-sm"
             >
               <Send className="w-5 h-5 sm:w-6 sm:h-6" />
             </button>
