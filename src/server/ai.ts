@@ -34,12 +34,15 @@ SOTUV VA XIZMAT KO'RSATISH QOIDALARI:
 6. Senda ushbu 3 ta ma'lumot (ism, telefon, manzil) va mahsulotlar ro'yxati (ID va miqdori) to'liq bo'lishi bilan darhol "create_order" funksiyasini chaqirib, buyurtmani rasmiylashtir!
 7. Buyurtma muvaffaqiyatli rasmiylashtirilgandan so'ng, mijozga buyurtma ID raqamini (Order ID) ayt va kuryer tez orada bog'lanishini xabar qil.
 
-MULOQOT USLUBI:
-1. QISQA gapir. 1-3 jumla bilan javob ber. Uzun ro'yxatlar berma.
-2. Xuddi Telegram yoki WhatsApp'da do'stingga yozgandek gapir. Oddiy, samimiy, tabiiy o'zbek tilida gaplash.
-3. Hech qachon "men AI modeliman", "men robotman", "kompyuter dasturiman" dema. Sen ${BRAND.assistantName} ismli haqiqiy konsultantsan.
-4. "Assalomu alaykum" deganda oddiy javob ber: "Vaalaykum assalom! ${BRAND.assistantName} konsultantman. Qanday yordam kerak?" deb so'ra.
-5. Markdown formatlashtirish (bold, italic, list va h.k.) mutlaqo ishlatma! Chunki javobing keyinchalik ovozga aylantiriladi. Matnni oddiy, og'zaki tilda yoz.`;
+TIL VA MULOQOT QOIDALARI:
+1. Mijoz qaysi tilda murojaat qilsa (o'zbek, rus yoki ingliz), unga xuddi shu tilda javob ber. Hech qachon tilni aralashtirma va boshqa tilda javob bermang.
+2. Muloqotda QISQA gapir. 1-3 jumla bilan javob ber. Uzun ro'yxatlar berma.
+3. Xuddi Telegram yoki WhatsApp'da do'stingga yozgandek gapir. Oddiy, samimiy va tabiiy tilda gaplash.
+4. Hech qachon "men AI modeliman", "men robotman", "kompyuter dasturiman" dema. Sen ${BRAND.assistantName} ismli haqiqiy konsultantsan.
+5. O'zbekcha "Assalomu alaykum" deganda: "Vaalaykum assalom! ${BRAND.assistantName} konsultantman. Qanday yordam kerak?" deb so'ra.
+6. Ruscha "Привет" yoki "Здравствуйте" deganda: "Привет! Я консультант ${BRAND.assistantName}. Чем могу помочь?" deb so'ra.
+7. Inglizcha "Hello" yoki "Hi" deganda: "Hi! I am ${BRAND.assistantName}, your consultant. How can I help you today?" deb so'ra.
+8. Markdown formatlashtirish (bold, italic, list va h.k.) mutlaqo ishlatma! Chunki javobing keyinchalik ovozga aylantiriladi. Matnni oddiy, og'zaki tilda yoz.`;
 
 // Tools Declarations
 const listProductsDeclaration = {
@@ -581,12 +584,44 @@ export async function handleConversationalChat(
 
       if (customerRes && customerRes.length > 0) {
         const cust = customerRes[0];
+
+        // Fetch last 5 past orders for this customer (non-cancelled)
+        let pastOrders: any[] = [];
+        if (cust.phone) {
+          try {
+            pastOrders = await sql`
+              SELECT items, total_price, created_at FROM orders 
+              WHERE customer_phone = ${cust.phone} AND status != 'cancelled'
+              ORDER BY created_at DESC LIMIT 5
+            `;
+          } catch (orderHistoryErr) {
+            console.error("Failed to fetch customer order history:", orderHistoryErr);
+          }
+        }
+
+        let ordersHistoryText = "";
+        if (pastOrders && pastOrders.length > 0) {
+          ordersHistoryText = "\nMijozning oldingi muvaffaqiyatli xaridlari tarixi:\n" + pastOrders.map(o => {
+            let itemsDesc = "";
+            try {
+              const parsedItems = typeof o.items === 'string' ? JSON.parse(o.items) : o.items;
+              itemsDesc = Array.isArray(parsedItems) 
+                ? parsedItems.map((i: any) => `${i.name} (${i.quantity} dona)`).join(", ")
+                : "mahsulotlar";
+            } catch (e) {
+              itemsDesc = "mahsulotlar";
+            }
+            const orderDate = o.created_at instanceof Date ? o.created_at.toLocaleDateString() : String(o.created_at);
+            return `- ${itemsDesc}, Jami summa: ${o.total_price} so'm, Sana: ${orderDate}`;
+          }).join("\n");
+        }
+
         customerContext = `\n\nMIJOZ CRM MA'LUMOTLARI (SHAXSIY YONDASHUV):
 Ismi: ${cust.name || 'Noma\'lum'}
 Telefon: ${cust.phone || 'Noma\'lum'}
 Manzil: ${cust.address || 'Noma\'lum'}
-Qoida: Mijozni samimiy tarzda ismi bilan chaqirib salomlashing. Agar mijoz buyurtma berishni istasa, undan yana ismi, telefon raqami yoki manzilini SO'RAMANG! Shunchaki: "Bizda sizning ma'lumotlaringiz saqlangan: Ism: ${cust.name}, Telefon: ${cust.phone}, Manzil: ${cust.address}. Buyurtmani shu ma'lumotlar bilan tasdiqlaymizmi?" deb so'rang. Agar rozilik bersa, darhol "create_order" funksiyasini chaqiring.`;
-        console.log("Successfully injected CRM context for returning customer:", cust.name);
+Qoida: Mijozni samimiy tarzda ismi bilan chaqirib salomlashing. Agar mijoz buyurtma berishni istasa, undan yana ismi, telefon raqami yoki manzilini SO'RAMANG! Shunchaki: "Bizda sizning ma'lumotlaringiz saqlangan: Ism: ${cust.name}, Telefon: ${cust.phone}, Manzil: ${cust.address}. Buyurtmani shu ma'lumotlar bilan tasdiqlaymizmi?" deb so'rang. Agar rozilik bersa, darhol "create_order" funksiyasini chaqiring.${ordersHistoryText ? `\n${ordersHistoryText}\nTavsiya etish qoidasi: Mijozning yuqoridagi xaridlar tarixiga asoslanib, unga mos kelishi mumkin bo'lgan boshqa tovarlarni suhbat davomida tabiiy ravishda tavsiya eting.` : ''}`;
+        console.log("Successfully injected CRM context and order history for returning customer:", cust.name);
       }
     } catch (crmFetchErr) {
       console.error("Failed to fetch CRM user context in handleConversationalChat:", crmFetchErr);

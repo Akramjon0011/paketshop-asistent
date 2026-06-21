@@ -1,4 +1,4 @@
-import { Telegraf } from "telegraf";
+import { Telegraf, Markup } from "telegraf";
 import { handleConversationalChat, generateSpeech, transcribeAudio, BRAND } from './ai.js';
 import { sql } from './db.js';
 import { spawn } from 'child_process';
@@ -83,6 +83,28 @@ export function setupBot(app: any) {
   }
 
   const bot = new Telegraf(botToken);
+
+  // Set the Telegram Web App Chat Menu Button (requires HTTPS)
+  const webAppUrl = process.env.APP_URL || "http://localhost:3000";
+  if (webAppUrl.startsWith('https://')) {
+    try {
+      bot.telegram.setChatMenuButton({
+        menuButton: {
+          type: 'web_app',
+          text: "🛍️ Do'kon",
+          web_app: { url: webAppUrl }
+        }
+      }).then(() => {
+        console.log("✅ Telegram Web App Menu Button set successfully to", webAppUrl);
+      }).catch(err => {
+        console.warn("⚠️ Failed to set Telegram Web App Menu Button:", err.message || err);
+      });
+    } catch (menuErr: any) {
+      console.warn("⚠️ Failed to set Telegram Web App Menu Button:", menuErr.message || menuErr);
+    }
+  } else {
+    console.log("ℹ️ Telegram Web App Menu Button registration skipped (only HTTPS URLs are allowed by Telegram).");
+  }
   
   bot.command('reset', async (ctx) => {
     if (sql) {
@@ -95,9 +117,21 @@ export function setupBot(app: any) {
     await ctx.reply("Suhbat tarixi tozalandi. Yangidan boshlaymiz!");
   });
 
+  bot.command('webapp', async (ctx) => {
+    const webAppUrl = process.env.APP_URL || "http://localhost:3000";
+    await ctx.reply("Bizning do'konimizni ochish uchun quyidagi tugmani bosing:", 
+      Markup.inlineKeyboard([
+        [Markup.button.webApp("🛍️ Do'konga kirish", webAppUrl)]
+      ])
+    );
+  });
+
   bot.start(async (ctx) => {
     const welcomeText = `Salom! Men ${BRAND.assistantName}, ${BRAND.shopName}'dan. Qanday yordam kerak?`;
-    await ctx.reply(welcomeText);
+    const webAppUrl = process.env.APP_URL || "http://localhost:3000";
+    await ctx.reply(welcomeText, Markup.inlineKeyboard([
+      [Markup.button.webApp("🛍️ Do'konni ochish", webAppUrl)]
+    ]));
     try {
       await ctx.sendChatAction('record_voice');
       const voiceBase64 = await generateSpeech(welcomeText);
