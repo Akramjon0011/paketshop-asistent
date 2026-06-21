@@ -42,7 +42,8 @@ TIL VA MULOQOT QOIDALARI:
 5. O'zbekcha "Assalomu alaykum" deganda: "Vaalaykum assalom! ${BRAND.assistantName} konsultantman. Qanday yordam kerak?" deb so'ra.
 6. Ruscha "Привет" yoki "Здравствуйте" deganda: "Привет! Я консультант ${BRAND.assistantName}. Чем могу помочь?" deb so'ra.
 7. Inglizcha "Hello" yoki "Hi" deganda: "Hi! I am ${BRAND.assistantName}, your consultant. How can I help you today?" deb so'ra.
-8. Markdown formatlashtirish (bold, italic, list va h.k.) mutlaqo ishlatma! Chunki javobing keyinchalik ovozga aylantiriladi. Matnni oddiy, og'zaki tilda yoz.`;
+8. Markdown formatlashtirish (bold, italic, list va h.k.) mutlaqo ishlatma! Chunki javobing keyinchalik ovozga aylantiriladi. Matnni oddiy, og'zaki tilda yoz.
+9. Har safar bitta aniq mahsulot haqida ma'lumot berganingda yoki uni tavsiya qilganingda, javobingning eng oxirida albatta \`[BUYURTMA: id]\` formatida maxsus tagni qo'shib yubor (bu yerda id - mahsulotning ID raqami). Masalan: \`[BUYURTMA: 6]\`. Bu tugma foydalanuvchiga to'g'ridan-to'g'ri buyurtma qilish imkonini beradi.`;
 
 // Tools Declarations
 const listProductsDeclaration = {
@@ -531,9 +532,18 @@ export async function getKnowledgeBaseContext() {
 // Generate TTS speech audio from text using Gemini 3.1
 export async function generateSpeech(text: string): Promise<string | null> {
   try {
+    const cleanText = text
+      .replace(/\[IMAGE:\s*(.*?)\]/gi, '')
+      .replace(/\[VIDEO:\s*(.*?)\]/gi, '')
+      .replace(/\[BUYURTMA:\s*(.*?)\]/gi, '')
+      .replace(/https?:\/\/[^\s]+/gi, '')
+      .trim();
+
+    if (!cleanText) return null;
+
     const response = await ai.models.generateContent({
       model: 'gemini-3.1-flash-tts-preview',
-      contents: [{ parts: [{ text }] }],
+      contents: [{ parts: [{ text: cleanText }] }],
       config: {
         responseModalities: [Modality.AUDIO],
         speechConfig: {

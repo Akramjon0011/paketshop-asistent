@@ -451,6 +451,30 @@ export default function Chat() {
     }
   };
 
+  const getMessageOrderId = (content: string): number | null => {
+    const match = content.match(/\[BUYURTMA:\s*(\d+)\]/i);
+    return match ? parseInt(match[1], 10) : null;
+  };
+
+  const handleInlineOrderClick = async (productId: number) => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/products/${productId}`);
+      if (!res.ok) {
+        throw new Error("Mahsulot ma'lumotlarini yuklab bo'lmadi.");
+      }
+      const product = await res.json();
+      setCheckoutProduct(product);
+      setQuantity(1);
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message || "Xatolik yuz berdi.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   // Helper visually replace audio tags for better chat reading
   const renderMessageContent = (content: string) => {
     let processedHTML = content;
@@ -461,6 +485,9 @@ export default function Chat() {
     // Convert custom tags to Markdown
     processedHTML = processedHTML.replace(/\[IMAGE:\s*(.*?)\]/g, '\n\n![Mahsulot rasmi]($1)\n\n');
     processedHTML = processedHTML.replace(/\[VIDEO:\s*(.*?)\]/g, '\n\n📺 **Batafsil video:** [YouTube orqali ko\'rish]($1)\n\n');
+    
+    // Strip buyurtma tags from markdown rendering
+    processedHTML = processedHTML.replace(/\[BUYURTMA:\s*\d+\]/gi, '');
     
     return processedHTML;
   };
@@ -522,6 +549,19 @@ export default function Chat() {
                         {renderMessageContent(message.content)}
                     </ReactMarkdown>
                   </div>
+
+                  {message.role === 'model' && getMessageOrderId(message.content) && (
+                    <div className="mt-3.5 pt-3 border-t border-gray-100 flex justify-end">
+                      <button
+                        onClick={() => handleInlineOrderClick(getMessageOrderId(message.content)!)}
+                        className="bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white font-bold text-xs py-2 px-4 rounded-xl shadow transition-all flex items-center gap-1.5 cursor-pointer hover:scale-[1.02]"
+                      >
+                        <Package className="w-3.5 h-3.5" />
+                        Hozir buyurtma berish
+                      </button>
+                    </div>
+                  )}
+
                   {message.isAudioPlaying && (
                       <div className="absolute -bottom-2 -left-2 text-amber-500 animate-pulse bg-white rounded-full p-0.5 shadow">
                          <Volume2 className="w-4 h-4" />

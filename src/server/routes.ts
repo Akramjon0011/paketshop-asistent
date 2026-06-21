@@ -62,6 +62,21 @@ router.get("/products/featured", async (_req, res) => {
   }
 });
 
+// Public: GET single product details by id
+router.get("/products/:id", async (req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  try {
+    const data = await sql`
+      SELECT id, name, description, price, category, stock, image_url 
+      FROM products WHERE id = ${req.params.id}
+    `;
+    if (data.length === 0) return res.status(404).json({ error: "Mahsulot topilmadi" });
+    res.json(data[0]);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // Public branding config — used by frontend to render shop name, assistant name, colors
 router.get("/config", (_req, res) => {
   res.json({
