@@ -200,7 +200,7 @@ async function dbGetProductDetails(product_id: number) {
   }
 }
 
-async function dbCreateOrder(
+export async function dbCreateOrder(
   customer_name: string,
   customer_phone: string,
   delivery_address: string,

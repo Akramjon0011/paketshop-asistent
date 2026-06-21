@@ -1,7 +1,7 @@
 import express from 'express';
 import multer from 'multer';
 import { sql } from './db.js';
-import { generateEmbedding, searchKnowledgeBase, handleConversationalChat, handleConversationalChatStream, transcribeAudio, generateSpeech, BRAND, BRAND_GREETING } from './ai.js';
+import { generateEmbedding, searchKnowledgeBase, handleConversationalChat, handleConversationalChatStream, transcribeAudio, generateSpeech, dbCreateOrder, BRAND, BRAND_GREETING, appendHistory } from './ai.js';
 import { GoogleGenAI } from "@google/genai";
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -354,6 +354,54 @@ router.post("/knowledge/reindex", requireAdmin, async (req, res) => {
     res.json({ success: true, total: data.length, updated });
   } catch (err) {
     console.error("Reindex error:", err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Public: GET customer details by webSessionId (for checkout form pre-fill)
+router.get("/customers/session/:webSessionId", async (req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  try {
+    const data = await sql`
+      SELECT name, phone, address FROM customers 
+      WHERE web_session_id = ${req.params.webSessionId}
+      LIMIT 1
+    `;
+    if (data.length === 0) return res.json(null);
+    res.json(data[0]);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Public: POST create order directly from checkout form
+router.post("/orders", async (req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  const { customer_name, customer_phone, delivery_address, items, webSessionId } = req.body;
+  if (!customer_name || !customer_phone || !delivery_address || !items || !Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: "Barcha maydonlar to'ldirilishi shart va mahsulotlar ro'yxati kamida bitta elementdan iborat bo'lishi kerak" });
+  }
+  try {
+    const result = await dbCreateOrder(
+      customer_name,
+      customer_phone,
+      delivery_address,
+      items,
+      undefined,
+      webSessionId
+    );
+    
+    if (result.success && webSessionId) {
+      const itemsList = items.map((i: any) => `${i.quantity} dona "${i.name || 'mahsulot'}"`).join(', ');
+      const userMsg = `Menga ${itemsList} mahsulotidan buyurtma bering. (Ism: ${customer_name}, Tel: ${customer_phone}, Manzil: ${delivery_address})`;
+      const modelMsg = `Rahmat! Buyurtmangiz qabul qilindi. Buyurtma raqami: #${result.order_id}. Jami: ${Number(result.total_price).toLocaleString()} so'm. Tez orada kuryerimiz siz bilan bog'lanadi.`;
+      await appendHistory({ webSessionId }, 'user', userMsg);
+      await appendHistory({ webSessionId }, 'model', modelMsg);
+    }
+    
+    res.json(result);
+  } catch (err) {
+    console.error("Direct order creation error:", err);
     res.status(500).json({ error: String(err) });
   }
 });
