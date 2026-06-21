@@ -152,13 +152,11 @@ export default function Chat() {
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!input.trim() || isLoading) return;
+  const sendMessageText = async (text: string) => {
+    if (!text.trim() || isLoading) return;
 
-    const userMessage: Message = { id: Date.now().toString(), role: 'user', content: input.trim() };
+    const userMessage: Message = { id: Date.now().toString(), role: 'user', content: text.trim() };
     setMessages(prev => [...prev, userMessage]);
-    setInput('');
     setIsLoading(true);
     setError(null);
     stopCurrentAudio(); // Stop audio if user types a new message
@@ -249,6 +247,18 @@ export default function Chat() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!input.trim() || isLoading) return;
+    const textToSend = input.trim();
+    setInput('');
+    await sendMessageText(textToSend);
+  };
+
+  const autoOrderProduct = (p: FeaturedProduct) => {
+    sendMessageText(`Menga 1 dona "${p.name}" (ID: ${p.id}) mahsulotidan buyurtma bering.`);
   };
 
   const startRecording = async () => {
@@ -473,25 +483,38 @@ export default function Chat() {
             </div>
             <div className="flex gap-3 overflow-x-auto pb-2 -mx-1 px-1 snap-x">
               {(carouselMode === 'popular' ? featured.popular : featured.latest).map((p) => (
-                <button
+                <div
                   key={p.id}
-                  onClick={() => handleProductClick(p)}
-                  className="snap-start shrink-0 w-32 sm:w-36 bg-white border border-gray-200 hover:border-amber-400 hover:shadow-md rounded-xl overflow-hidden transition-all text-left"
+                  className="snap-start shrink-0 w-32 sm:w-36 bg-white border border-gray-200 hover:border-amber-400 hover:shadow-md rounded-xl overflow-hidden transition-all text-left flex flex-col justify-between"
                 >
-                  {p.image_url ? (
-                    <img src={p.image_url} alt={p.name} className="w-full h-20 object-cover" />
-                  ) : (
-                    <div className="w-full h-20 bg-gray-100 flex items-center justify-center">
-                      <Package className="w-6 h-6 text-gray-300" />
+                  <div 
+                    onClick={() => handleProductClick(p)}
+                    className="cursor-pointer"
+                  >
+                    {p.image_url ? (
+                      <img src={p.image_url} alt={p.name} className="w-full h-20 object-cover" />
+                    ) : (
+                      <div className="w-full h-20 bg-gray-100 flex items-center justify-center">
+                        <Package className="w-6 h-6 text-gray-300" />
+                      </div>
+                    )}
+                    <div className="p-2 pb-1">
+                      <p className="text-xs font-bold text-gray-900 line-clamp-1">{p.name}</p>
+                      <p className="text-xs font-extrabold text-amber-600 mt-0.5">
+                        {Number(p.price).toLocaleString()} {brand.currency}
+                      </p>
                     </div>
-                  )}
-                  <div className="p-2">
-                    <p className="text-xs font-bold text-gray-900 line-clamp-1">{p.name}</p>
-                    <p className="text-xs font-extrabold text-amber-600 mt-0.5">
-                      {Number(p.price).toLocaleString()} {brand.currency}
-                    </p>
                   </div>
-                </button>
+                  <div className="p-2 pt-0">
+                    <button
+                      onClick={() => autoOrderProduct(p)}
+                      disabled={isLoading}
+                      className="w-full bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white text-[10px] sm:text-xs font-bold py-1 px-2 rounded-lg transition-all text-center flex items-center justify-center gap-1 shadow-sm cursor-pointer"
+                    >
+                      🛒 Buyurtma
+                    </button>
+                  </div>
+                </div>
               ))}
             </div>
           </div>
