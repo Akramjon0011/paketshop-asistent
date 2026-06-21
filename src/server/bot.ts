@@ -134,10 +134,27 @@ export function setupBot(app: any) {
 
   bot.start(async (ctx) => {
     const welcomeText = `Salom! Men ${BRAND.assistantName}, ${BRAND.shopName}'dan. Qanday yordam kerak?`;
-    const webAppUrl = process.env.APP_URL || "http://localhost:3000";
-    await ctx.reply(welcomeText, Markup.inlineKeyboard([
-      [getWebAppButton("🛍️ Do'konni ochish", webAppUrl)]
-    ]));
+    const appUrl = process.env.APP_URL || "http://localhost:3000";
+    
+    // Try sending with inline button, fallback to plain text if Telegram rejects the URL
+    try {
+      if (appUrl.startsWith('https://')) {
+        await ctx.reply(welcomeText, Markup.inlineKeyboard([
+          [getWebAppButton("\ud83d\uded2 Do'konni ochish", appUrl)]
+        ]));
+      } else {
+        // http:// URL — Telegram rejects inline URL buttons for non-HTTPS, send plain text
+        await ctx.reply(welcomeText);
+      }
+    } catch (replyErr: any) {
+      console.warn("/start reply with button failed, sending plain text:", replyErr.message);
+      try {
+        await ctx.reply(welcomeText);
+      } catch (plainErr) {
+        console.error("/start plain text reply also failed:", plainErr);
+      }
+    }
+    
     try {
       await ctx.sendChatAction('record_voice');
       const voiceBase64 = await generateSpeech(welcomeText);
@@ -234,6 +251,7 @@ export function setupBot(app: any) {
       });
 
       let plainText = finalResponseText
+          .replace(/\[BUYURTMA:\s*\d+\]/gi, '')  // Buyurtma taglarni olib tashla
           .replace(/\[laughing\]/gi, "😄")
           .replace(/\[short pause\]/gi, "...")
           .replace(/\[sigh\]/gi, "😌")
