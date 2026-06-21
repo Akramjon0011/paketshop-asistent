@@ -117,11 +117,17 @@ export function setupBot(app: any) {
     await ctx.reply("Suhbat tarixi tozalandi. Yangidan boshlaymiz!");
   });
 
+  const getWebAppButton = (text: string, url: string) => {
+    return url.startsWith('https://') 
+      ? Markup.button.webApp(text, url)
+      : Markup.button.url(text, url);
+  };
+
   bot.command('webapp', async (ctx) => {
     const webAppUrl = process.env.APP_URL || "http://localhost:3000";
     await ctx.reply("Bizning do'konimizni ochish uchun quyidagi tugmani bosing:", 
       Markup.inlineKeyboard([
-        [Markup.button.webApp("🛍️ Do'konga kirish", webAppUrl)]
+        [getWebAppButton("🛍️ Do'konga kirish", webAppUrl)]
       ])
     );
   });
@@ -130,7 +136,7 @@ export function setupBot(app: any) {
     const welcomeText = `Salom! Men ${BRAND.assistantName}, ${BRAND.shopName}'dan. Qanday yordam kerak?`;
     const webAppUrl = process.env.APP_URL || "http://localhost:3000";
     await ctx.reply(welcomeText, Markup.inlineKeyboard([
-      [Markup.button.webApp("🛍️ Do'konni ochish", webAppUrl)]
+      [getWebAppButton("🛍️ Do'konni ochish", webAppUrl)]
     ]));
     try {
       await ctx.sendChatAction('record_voice');
