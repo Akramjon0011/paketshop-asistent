@@ -419,7 +419,7 @@ router.post("/tts", aiLimiter, async (req, res) => {
     const requested = String(req.query.model || '');
     const model = requested === 'lite' ? TTS_MODELS.lite : requested === 'flash' ? TTS_MODELS.flash : undefined;
     const result = await generateSpeechDetailed(text, model);
-    res.json({ audio: result.audio, model: result.model, ms: result.ms });
+    res.json({ audio: result.audio, model: result.model, ms: result.ms, ...(requested ? { primaryError: result.primaryError } : {}) });
   } catch (err) {
     console.error("TTS route error:", err);
     res.status(500).json({ error: "Ovoz yaratib bo'lmadi" });

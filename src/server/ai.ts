@@ -604,7 +604,7 @@ async function synthesizeWithTtsModel(text: string, ttsModel: string = TTS_MODEL
 }
 
 // Returns the raw PCM audio plus which model produced it and how long it took (used for model comparisons)
-export async function generateSpeechDetailed(text: string, model?: string): Promise<{ audio: string | null; model: string | null; ms: number }> {
+export async function generateSpeechDetailed(text: string, model?: string): Promise<{ audio: string | null; model: string | null; ms: number; primaryError?: string }> {
   const started = Date.now();
   const cleanText = text
     .replace(/\[IMAGE:\s*(.*?)\]/gi, '')
@@ -618,11 +618,14 @@ export async function generateSpeechDetailed(text: string, model?: string): Prom
   if (!cleanText) return { audio: null, model: null, ms: 0 };
 
   const primary = model || TTS_MODEL;
+  let primaryError: string | undefined;
   try {
     const pcm = await synthesizeWithTtsModel(cleanText, primary);
     if (pcm) return { audio: pcm, model: primary, ms: Date.now() - started };
+    primaryError = 'no audio in response';
   } catch (err) {
-    console.warn("TTS model failed, falling back to preview model:", err);
+    primaryError = String((err as any)?.message || err).slice(0, 240);
+    console.warn("TTS model failed, falling back to preview model:", primaryError);
   }
 
   try {
@@ -639,10 +642,10 @@ export async function generateSpeechDetailed(text: string, model?: string): Prom
       },
     });
     const audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || null;
-    return { audio, model: audio ? TTS_FALLBACK_MODEL : null, ms: Date.now() - started };
+    return { audio, model: audio ? TTS_FALLBACK_MODEL : null, ms: Date.now() - started, primaryError };
   } catch (err) {
     console.error("Speech generation error in backend:", err);
-    return { audio: null, model: null, ms: Date.now() - started };
+    return { audio: null, model: null, ms: Date.now() - started, primaryError };
   }
 }
 
