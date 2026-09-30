@@ -484,6 +484,28 @@ router.post("/chat/voice", aiLimiter, uploadMemory.single('audio'), async (req, 
   }
 });
 
+// 1.6. Photo from the web chat ("do you have this?"): the assistant looks at it and searches the catalog
+router.post("/chat/image", aiLimiter, uploadMemory.single('image'), async (req, res) => {
+  if (!req.file || !/^image\/(jpeg|png|webp)$/i.test(req.file.mimetype)) {
+    return res.status(400).json({ error: "Faqat rasm (JPG, PNG yoki WEBP) yuboring" });
+  }
+  const { webSessionId } = req.body;
+  const caption = String(req.body.message || '').trim().slice(0, 500)
+    || "Mijoz mahsulot rasmini yubordi. Katalogda shunga o'xshash mahsulot bormi?";
+  let history: any[] = [];
+  if (req.body.history) {
+    try { history = JSON.parse(req.body.history); } catch { /* ignore a malformed history */ }
+  }
+  try {
+    const reply = await handleConversationalChat(caption, history, { webSessionId }, undefined,
+      [{ data: req.file.buffer.toString('base64'), mimeType: req.file.mimetype }]);
+    res.json({ reply });
+  } catch (err) {
+    console.error("Image chat error:", err);
+    res.status(500).json({ error: "Rasmni qayta ishlashda xatolik yuz berdi" });
+  }
+});
+
 // 2. Admin: List all products
 router.get("/admin/products", requireAdmin, async (req, res) => {
   if (!sql) return res.status(500).json({ error: "Database not connected" });

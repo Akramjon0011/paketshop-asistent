@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
-import { Send, User, Package, Loader2, Sparkles, Volume2, VolumeX, Mic, Square } from 'lucide-react';
+import { Send, User, Package, Loader2, Sparkles, Volume2, VolumeX, Mic, Square, Paperclip } from 'lucide-react';
 import { generateSpeech } from '../services/geminiService';
 import { formatPrice } from '../lib/format';
 import ProductImage from '../components/ProductImage';
@@ -10,8 +10,25 @@ type Message = {
   id: string;
   role: 'user' | 'model';
   content: string;
+  imageUrl?: string;
   isAudioPlaying?: boolean;
 };
+
+// Phone photos are several MB; shrink to <=1280px JPEG before uploading
+async function downscaleImage(file: File): Promise<Blob> {
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, 1280 / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    canvas.getContext('2d')!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const blob: Blob | null = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.82));
+    if (blob) return blob;
+  } catch { /* fall through: send the original if it is small enough */ }
+  if (file.size > 4 * 1024 * 1024) throw new Error("Rasm juda katta");
+  return file;
+}
 
 // Singleton audio context for consistent playback
 let globalAudioCtx: AudioContext | null = null;
@@ -353,6 +370,51 @@ export default function Chat() {
     }
   };
 
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Photo of a product ("do you have this?"): shown in the chat, answered by the assistant
+  const handleImageSelected = async (file: File | undefined) => {
+    if (!file || isLoading) return;
+    if (!/^image\//.test(file.type)) { setError("Faqat rasm yuboring (JPG, PNG yoki WEBP)."); return; }
+    setError(null);
+    stopCurrentAudio();
+
+    const caption = input.trim();
+    setInput('');
+    const previewUrl = URL.createObjectURL(file);
+    setMessages(prev => [...prev, { id: Date.now().toString(), role: 'user', content: caption || "Shunday mahsulot bormi?", imageUrl: previewUrl }]);
+    setIsLoading(true);
+
+    try {
+      const blob = await downscaleImage(file);
+      const formData = new FormData();
+      formData.append('image', blob, 'photo.jpg');
+      formData.append('message', caption);
+      formData.append('webSessionId', webSessionId);
+      formData.append('history', JSON.stringify(messages.map(m => ({ role: m.role, content: m.content }))));
+
+      const res = await fetch('/api/chat/image', { method: 'POST', body: formData });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Rasmni yuborib bo'lmadi.");
+
+      const replyText = data.reply || "Kechirasiz, rasmni tushuna olmadim.";
+      const modelMessageId = (Date.now() + 1).toString();
+      setMessages(prev => [...prev, { id: modelMessageId, role: 'model', content: replyText }]);
+      setIsLoading(false);
+      if (isAudioEnabled) {
+        generateSpeech(replyText)
+          .then(audioData => { if (audioData) playPCMBase64(audioData, modelMessageId); })
+          .catch(audioErr => console.error("TTS generation failed after image reply:", audioErr));
+      }
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message || "Rasmni qayta ishlashda xatolik yuz berdi.");
+    } finally {
+      setIsLoading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
   const getMessageOrderId = (content: string): number | null => {
     const match = content.match(/\[BUYURTMA:\s*(\d+)\]/i);
     return match ? parseInt(match[1], 10) : null;
@@ -441,6 +503,9 @@ export default function Chat() {
                     ? 'bg-amber-500 text-white rounded-tr-sm'
                     : 'bg-white border border-gray-100 text-gray-800 rounded-tl-sm'
                 }`}>
+                  {message.imageUrl && (
+                    <img src={message.imageUrl} alt="Yuborilgan rasm" className="mb-2 max-h-48 rounded-lg object-cover" />
+                  )}
                   <div className={`prose max-w-none text-sm sm:text-base ${message.role === 'user' ? 'prose-invert' : ''}`}>
                     <ReactMarkdown>
                         {renderMessageContent(message.content)}
@@ -514,6 +579,23 @@ export default function Chat() {
             </div>
           )}
           <form onSubmit={handleSubmit} className="flex relative items-end space-x-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => handleImageSelected(e.target.files?.[0])}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isLoading || isRecording}
+              className="bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-xl p-3 sm:p-4 transition-colors flex-shrink-0 flex items-center justify-center h-[56px] w-[56px] disabled:opacity-50 shadow-sm"
+              title="Mahsulot rasmini yuborish"
+              aria-label="Rasm yuborish"
+            >
+              <Paperclip className="w-5 h-5 sm:w-6 sm:h-6" />
+            </button>
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}

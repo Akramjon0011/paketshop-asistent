@@ -238,7 +238,8 @@ Bilimlar bazasi: ${res.knowledge} bo'lim (${res.embedded} tasi qidiruvga tayyor)
     ctx: any, 
     messageObj: any, 
     isVoice: boolean, 
-    businessConnectionId?: string
+    businessConnectionId?: string,
+    isPhoto = false
   ) {
     if (!messageObj || !messageObj.from) return;
     const userId = messageObj.from.id;
@@ -259,6 +260,7 @@ Bilimlar bazasi: ${res.knowledge} bo'lim (${res.embedded} tasi qidiruvga tayyor)
       await sendAction('typing');
 
       let queryText = "";
+      let images: { data: string; mimeType: string }[] | undefined;
       if (isVoice) {
         const voice = messageObj.voice;
         console.log(`🎙️ Voice message from ${userId} in chat ${chatId}: file_id=${voice.file_id}`);
@@ -284,6 +286,19 @@ Bilimlar bazasi: ${res.knowledge} bo'lim (${res.embedded} tasi qidiruvga tayyor)
         console.log(`🎙️ Transcribed voice message: "${transcribedText}"`);
         await ctx.telegram.sendMessage(chatId, `🎙️ Siz: "${transcribedText}"`, replyOptions);
         queryText = transcribedText;
+      } else if (isPhoto) {
+        // A photo (or an image sent as a file): let the assistant look at it
+        const doc = messageObj.document;
+        const fileId = doc ? doc.file_id : messageObj.photo?.[messageObj.photo.length - 1]?.file_id;
+        const link = await ctx.telegram.getFileLink(fileId);
+        const imgRes = await fetch(link.href, { signal: AbortSignal.timeout(15000) });
+        const imgBuffer = Buffer.from(await imgRes.arrayBuffer());
+        if (imgBuffer.length > 6 * 1024 * 1024) {
+          await ctx.telegram.sendMessage(chatId, "Rasm juda katta. Iltimos, kichikroq rasm yuboring.", replyOptions);
+          return;
+        }
+        images = [{ data: imgBuffer.toString('base64'), mimeType: doc?.mime_type || 'image/jpeg' }];
+        queryText = (messageObj.caption || '').trim() || "Mijoz mahsulot rasmini yubordi. Katalogda shunga o'xshash mahsulot bormi?";
       } else {
         queryText = messageObj.text || "";
       }
@@ -293,7 +308,7 @@ Bilimlar bazasi: ${res.knowledge} bo'lim (${res.embedded} tasi qidiruvga tayyor)
       console.log(`📨 Telegram message from ${userId}: "${queryText}"`);
 
       // History is loaded/persisted inside handleConversationalChat via userContext
-      const responseText = await handleConversationalChat(queryText, [], { telegramId: userId });
+      const responseText = await handleConversationalChat(queryText, [], { telegramId: userId }, undefined, images);
 
       let finalResponseText = responseText;
       let imageUrls: string[] = [];
@@ -380,6 +395,16 @@ Bilimlar bazasi: ${res.knowledge} bo'lim (${res.embedded} tasi qidiruvga tayyor)
 
   bot.on('voice', async (ctx) => {
     await processMessage(ctx, ctx.message, true);
+  });
+
+  bot.on('photo', async (ctx) => {
+    await processMessage(ctx, ctx.message, false, undefined, true);
+  });
+
+  // Images sent "as a file" (uncompressed); other documents are ignored
+  bot.on('document', async (ctx) => {
+    if (!String(ctx.message.document.mime_type || '').startsWith('image/')) return;
+    await processMessage(ctx, ctx.message, false, undefined, true);
   });
 
   // Bind Telegram Business Chatbot Handlers

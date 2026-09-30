@@ -11,7 +11,7 @@ export const CHAT_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 export const CHAT_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.5-flash-lite';
 
 // A Gemini call that hangs (seen: 77s and >300s stalls) is cut off and retried on the fallback model instead
-const GEMINI_CALL_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS) || 25000;
+const GEMINI_CALL_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS) || 15000;
 
 function isTransientGeminiError(err: any): boolean {
   const status = Number(err?.status ?? err?.code);
@@ -132,6 +132,9 @@ SO'ROV YUBORISH
 - Muvaffaqiyatli bo'lsa: so'rov raqamini ayt va natijadagi manager_reply ma'nosini ayt (menejer qoldiq va yakuniy narxni tasdiqlab bog'lanadi).
 - Bu yakuniy buyurtma emas; to'lov va yetkazishni menejer mijoz bilan kelishadi. Mijozdan karta yoki to'lov ma'lumotini so'rama.
 - Mijoz so'rov raqami bilan holatini so'rasa, check_order_status ni chaqir.
+
+RASM QABUL QILISH
+Mijoz mahsulot rasmini yuborsa (masalan "shundan bormi?"): avval rasmda nima borligini qisqa ayt (turi, rangi, taxminiy hajmi yoki o'lchami, material, qopqoq bor-yo'qligi), keyin search_products bilan katalogdan eng mos 1–3 mahsulotni top. Aniq bir xil ekanini va'da qilma: "o'xshash variant bor, aniq mosligini menejer tasdiqlaydi" de. Katalogda o'xshashi bo'lmasa, buni ochiq ayt va menejerga yo'naltir; menejer rasm bo'yicha topib berishini kafolatlama.
 
 ISH VAQTI VA ALOQA
 ${SHOP.hoursText}. Telefon: ${SHOP.phone}. Telegram: ${SHOP.telegram}. Sayt: ${SHOP.site}. Hozir: ${shopStatusLine()}.
@@ -696,11 +699,15 @@ Qoida: Mijozni ismi bilan hurmat bilan chaqir. So'rov yuborishda ism, telefon va
 }
 
 // Conversational Chat Handler with Function Calling Loop, Parallel Pre-fetch, and Native Streaming
+// A photo the customer sent (e.g. a sample cup: "do you have this?")
+export type ImageAttachment = { data: string; mimeType: string };
+
 export async function handleConversationalChat(
   message: string,
   history: Array<{ role: 'user' | 'model'; content: string }>,
   userContext?: { telegramId?: number; webSessionId?: string },
-  onChunk?: (text: string) => void
+  onChunk?: (text: string) => void,
+  images?: ImageAttachment[]
 ): Promise<string> {
   const hasUserContext = !!(userContext && (userContext.telegramId || userContext.webSessionId));
 
@@ -730,8 +737,10 @@ export async function handleConversationalChat(
   }
   contents.push({
     role: 'user',
-    parts: [{ text: message }]
+    parts: [{ text: message }, ...(images ?? []).map(img => ({ inlineData: { data: img.data, mimeType: img.mimeType } }))]
   });
+  // History keeps text only, so mark that a photo was sent
+  const historyText = images?.length ? `[Rasm yuborildi] ${message}` : message;
 
   const tools: any[] = [{
     functionDeclarations: [
@@ -788,7 +797,7 @@ export async function handleConversationalChat(
 
         const responseText = streamText || "Kechirasiz, men buni tushunmadim.";
         if (userContext) {
-          await appendHistory(userContext, 'user', message);
+          await appendHistory(userContext, 'user', historyText);
           await appendHistory(userContext, 'model', responseText);
         }
         return responseText;
@@ -848,7 +857,7 @@ export async function handleConversationalChat(
       }
 
       if (userContext) {
-        await appendHistory(userContext, 'user', message);
+        await appendHistory(userContext, 'user', historyText);
         await appendHistory(userContext, 'model', responseText);
       }
 
@@ -866,9 +875,10 @@ export async function handleConversationalChatStream(
   message: string,
   history: Array<{ role: 'user' | 'model'; content: string }>,
   userContext: { telegramId?: number; webSessionId?: string } | undefined,
-  onChunk: (text: string) => void
+  onChunk: (text: string) => void,
+  images?: ImageAttachment[]
 ): Promise<string> {
-  return await handleConversationalChat(message, history, userContext, onChunk);
+  return await handleConversationalChat(message, history, userContext, onChunk, images);
 }
 
 // Transcribe raw audio to text.
