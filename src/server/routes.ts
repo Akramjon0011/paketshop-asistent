@@ -41,6 +41,24 @@ router.get("/health", (req, res) => {
   res.json({ status: "ok", commit: process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7), webAppUrl: process.env.APP_URL });
 });
 
+// Public: full catalog for the shop page (in-stock items first). Edge-cached briefly; stock is re-checked when an order is placed.
+router.get("/products", async (_req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  try {
+    const data = await sql`
+      SELECT id, name, description, price, category, stock, image_url
+      FROM products
+      ORDER BY (stock > 0) DESC, created_at DESC
+      LIMIT 200
+    `;
+    res.set('Cache-Control', 'public, s-maxage=30, stale-while-revalidate=120');
+    res.json(data);
+  } catch (err) {
+    console.error("Products list error:", err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // Public: featured products for the chat carousel — latest 6 + top-sold 6
 router.get("/products/featured", async (_req, res) => {
   if (!sql) return res.status(500).json({ error: "Database not connected" });
@@ -102,7 +120,7 @@ import rateLimit from 'express-rate-limit';
 
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per window
+  max: 300, // Limit each IP to 300 requests per window (mobile carriers share IPs)
   message: { error: "Juda ko'p so'rov yuborildi. Iltimos 15 daqiqadan so'ng qayta urinib ko'ring." }
 });
 

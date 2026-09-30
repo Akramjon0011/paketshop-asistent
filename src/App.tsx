@@ -1,5 +1,6 @@
 import { Component, type ReactNode } from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import Shop from './pages/Shop';
 import Chat from './pages/Chat';
 import Admin from './pages/Admin';
 
@@ -25,8 +26,10 @@ export default function App() {
     <ErrorBoundary>
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={<Chat />} />
+        <Route path="/" element={<Shop />} />
+        <Route path="/chat" element={<Chat />} />
         <Route path="/admin" element={<Admin />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>
     </ErrorBoundary>

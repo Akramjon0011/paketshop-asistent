@@ -1,7 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
-import { Send, User, Package, Loader2, Sparkles, Volume2, VolumeX, Mic, Square } from 'lucide-react';
+import { Send, User, Package, Loader2, Sparkles, Volume2, VolumeX, Mic, Square, Store } from 'lucide-react';
 import { generateSpeech } from '../services/geminiService';
+import { formatPrice } from '../lib/format';
+import ProductImage from '../components/shop/ProductImage';
 
 type Message = {
   id: string;
@@ -51,7 +54,8 @@ export default function Chat() {
   const [messages, setMessages] = useState<Message[]>([
     { id: '1', role: 'model', content: DEFAULT_BRAND.greeting }
   ]);
-  const [input, setInput] = useState('');
+  const [searchParams] = useSearchParams();
+  const [input, setInput] = useState(() => searchParams.get('q') ?? '');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
@@ -330,7 +334,7 @@ export default function Chat() {
       
       // Add model message mock
       const modelMsgId = (Date.now() + 1).toString();
-      const modelMsgText = `Rahmat! Buyurtmangiz qabul qilindi. Buyurtma raqami: #${data.order_id}. Jami: ${Number(data.total_price).toLocaleString()} so'm. Tez orada kuryerimiz siz bilan bog'lanadi.`;
+      const modelMsgText = `Rahmat! Buyurtmangiz qabul qilindi. Buyurtma raqami: #${data.order_id}. Jami: ${formatPrice(data.total_price)} so'm. Tez orada kuryerimiz siz bilan bog'lanadi.`;
       const modelMessage: Message = { id: modelMsgId, role: 'model', content: modelMsgText };
       
       setMessages(prev => [...prev, userMessage, modelMessage]);
@@ -494,7 +498,7 @@ export default function Chat() {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-gray-50 font-sans">
+    <div className="flex flex-col h-dvh bg-gray-50 font-sans">
       {/* Header */}
       <header className="bg-amber-500 text-white shadow-md p-4 flex items-center justify-between z-10 shrink-0">
         <div className="flex items-center space-x-3 w-full max-w-4xl mx-auto px-4 sm:px-0 justify-between">
@@ -509,6 +513,10 @@ export default function Chat() {
               </p>
             </div>
           </div>
+          <div className="flex items-center gap-2 shrink-0">
+          <Link to="/" className="bg-white/20 hover:bg-white/30 p-2 rounded-full transition-colors flex items-center justify-center" title="Do'kon" aria-label="Do'konga qaytish">
+             <Store className="w-5 h-5" />
+          </Link>
           <button 
              onClick={() => {
                  setIsAudioEnabled(!isAudioEnabled);
@@ -519,6 +527,7 @@ export default function Chat() {
           >
              {isAudioEnabled ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5 opacity-70" />}
           </button>
+          </div>
         </div>
       </header>
 
@@ -624,7 +633,7 @@ export default function Chat() {
                     className="cursor-pointer"
                   >
                     {p.image_url ? (
-                      <img src={p.image_url} alt={p.name} className="w-full h-20 object-cover" />
+                      <ProductImage src={p.image_url} alt={p.name} className="w-full h-20" />
                     ) : (
                       <div className="w-full h-20 bg-gray-100 flex items-center justify-center">
                         <Package className="w-6 h-6 text-gray-300" />
@@ -633,7 +642,7 @@ export default function Chat() {
                     <div className="p-2 pb-1">
                       <p className="text-xs font-bold text-gray-900 line-clamp-1">{p.name}</p>
                       <p className="text-xs font-extrabold text-amber-600 mt-0.5">
-                        {Number(p.price).toLocaleString()} {brand.currency}
+                        {formatPrice(p.price)} {brand.currency}
                       </p>
                     </div>
                   </div>
@@ -735,7 +744,7 @@ export default function Chat() {
               {/* Product Info Card */}
               <div className="flex items-center gap-4 bg-gray-50 p-4 rounded-xl border border-gray-150">
                 {checkoutProduct.image_url ? (
-                  <img src={checkoutProduct.image_url} alt={checkoutProduct.name} className="w-16 h-16 object-cover rounded-lg border border-gray-200" />
+                  <ProductImage src={checkoutProduct.image_url} alt={checkoutProduct.name} className="w-16 h-16 rounded-lg border border-gray-200" />
                 ) : (
                   <div className="w-16 h-16 bg-gray-200 flex items-center justify-center rounded-lg border border-gray-200">
                     <Package className="w-8 h-8 text-gray-400" />
@@ -744,7 +753,7 @@ export default function Chat() {
                 <div className="flex-1 min-w-0">
                   <h4 className="text-sm font-bold text-gray-950 truncate">{checkoutProduct.name}</h4>
                   <p className="text-sm font-black text-amber-600 mt-0.5">
-                    {Number(checkoutProduct.price).toLocaleString()} {brand.currency}
+                    {formatPrice(checkoutProduct.price)} {brand.currency}
                   </p>
                   {checkoutProduct.category && (
                     <span className="inline-block bg-amber-100 text-amber-800 text-[10px] font-bold px-2 py-0.5 rounded-full mt-1">
@@ -826,7 +835,7 @@ export default function Chat() {
               <div className="pt-2 flex justify-between items-center text-sm font-semibold border-t border-gray-100">
                 <span className="text-gray-600">Umumiy summa:</span>
                 <span className="text-lg font-black text-amber-600">
-                  {(Number(checkoutProduct.price) * quantity).toLocaleString()} {brand.currency}
+                  {formatPrice(Number(checkoutProduct.price) * quantity)} {brand.currency}
                 </span>
               </div>
 
