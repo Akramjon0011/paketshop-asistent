@@ -44,6 +44,7 @@ router.get("/health", (req, res) => {
 // Public: GET single product details by id
 router.get("/products/:id", async (req, res) => {
   if (!sql) return res.status(500).json({ error: "Database not connected" });
+  if (!/^\d+$/.test(req.params.id)) return res.status(404).json({ error: "Mahsulot topilmadi" });
   try {
     await initDb(); // the `active` / `url` columns come from the schema update
     const data = await sql`
