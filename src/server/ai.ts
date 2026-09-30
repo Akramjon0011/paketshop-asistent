@@ -9,6 +9,9 @@ export const CHAT_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 // Used when the primary model keeps answering 503/429 (high demand spikes)
 export const CHAT_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.5-flash-lite';
 
+// A Gemini call that hangs (seen: 77s and >300s stalls) is cut off and retried on the fallback model instead
+const GEMINI_CALL_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS) || 25000;
+
 function isTransientGeminiError(err: any): boolean {
   const status = Number(err?.status ?? err?.code);
   if ([429, 500, 502, 503, 504].includes(status)) return true;
@@ -21,10 +24,16 @@ export async function generateContentResilient(params: Parameters<typeof ai.mode
   let lastErr: any;
   for (const model of models) {
     for (let attempt = 0; attempt < 2; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), GEMINI_CALL_TIMEOUT_MS);
       try {
-        return await ai.models.generateContent({ ...params, model });
+        return await ai.models.generateContent({ ...params, model, config: { ...params.config, abortSignal: controller.signal } });
       } catch (err) {
         lastErr = err;
+        if (controller.signal.aborted) {
+          console.warn(`Gemini ${model} timed out after ${GEMINI_CALL_TIMEOUT_MS}ms, switching model`);
+          break; // don't retry a model that just stalled
+        }
         if (Number((err as any)?.status) === 400 && /think/i.test(String((err as any)?.message)) && params.config?.thinkingConfig) {
           params = { ...params, config: { ...params.config, thinkingConfig: undefined } };
           attempt--;
@@ -33,6 +42,8 @@ export async function generateContentResilient(params: Parameters<typeof ai.mode
         if (!isTransientGeminiError(err)) throw err;
         console.warn(`Gemini ${model} transient error (attempt ${attempt + 1}):`, (err as any)?.status ?? '', String((err as any)?.message || err).slice(0, 120));
         if (attempt === 0) await new Promise(r => setTimeout(r, 700));
+      } finally {
+        clearTimeout(timer);
       }
     }
   }
@@ -45,10 +56,16 @@ export async function generateContentStreamResilient(params: Parameters<typeof a
   let lastErr: any;
   for (const model of models) {
     for (let attempt = 0; attempt < 2; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), GEMINI_CALL_TIMEOUT_MS); // cleared as soon as the stream has started
       try {
-        return await ai.models.generateContentStream({ ...params, model });
+        return await ai.models.generateContentStream({ ...params, model, config: { ...params.config, abortSignal: controller.signal } });
       } catch (err) {
         lastErr = err;
+        if (controller.signal.aborted) {
+          console.warn(`Gemini stream ${model} timed out after ${GEMINI_CALL_TIMEOUT_MS}ms, switching model`);
+          break;
+        }
         if (Number((err as any)?.status) === 400 && /think/i.test(String((err as any)?.message)) && params.config?.thinkingConfig) {
           params = { ...params, config: { ...params.config, thinkingConfig: undefined } };
           attempt--;
@@ -57,6 +74,8 @@ export async function generateContentStreamResilient(params: Parameters<typeof a
         if (!isTransientGeminiError(err)) throw err;
         console.warn(`Gemini stream ${model} transient error (attempt ${attempt + 1}):`, (err as any)?.status ?? '', String((err as any)?.message || err).slice(0, 120));
         if (attempt === 0) await new Promise(r => setTimeout(r, 700));
+      } finally {
+        clearTimeout(timer);
       }
     }
   }
