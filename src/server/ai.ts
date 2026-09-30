@@ -1,4 +1,4 @@
-import { GoogleGenAI, Modality } from "@google/genai";
+import { GoogleGenAI, Modality, ThinkingLevel } from "@google/genai";
 import { sql } from './db.js';
 
 const geminiKey = process.env.GEMINI_API_KEY;
@@ -24,6 +24,11 @@ export async function generateContentResilient(params: Parameters<typeof ai.mode
         return await ai.models.generateContent({ ...params, model });
       } catch (err) {
         lastErr = err;
+        if (Number((err as any)?.status) === 400 && /think/i.test(String((err as any)?.message)) && params.config?.thinkingConfig) {
+          params = { ...params, config: { ...params.config, thinkingConfig: undefined } };
+          attempt--;
+          continue;
+        }
         if (!isTransientGeminiError(err)) throw err;
         console.warn(`Gemini ${model} transient error (attempt ${attempt + 1}):`, (err as any)?.status ?? '', String((err as any)?.message || err).slice(0, 120));
         if (attempt === 0) await new Promise(r => setTimeout(r, 700));
@@ -788,6 +793,7 @@ Qoida: Mijozni samimiy tarzda ismi bilan chaqirib salomlashing. Agar mijoz buyur
         config: {
           systemInstruction: fullSystemInstruction,
           temperature: 0.7,
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }, // chat replies don't need deep reasoning; keeps latency down
           tools: tools
         }
       });
@@ -845,8 +851,9 @@ Qoida: Mijozni samimiy tarzda ismi bilan chaqirib salomlashing. Agar mijoz buyur
         continue;
       }
 
-      const textPart = parts.find(p => p.text);
-      let responseText = textPart?.text || "Kechirasiz, men buni tushunmadim.";
+      // Gemini 3 can split the answer across several parts (and add thought parts) — join the visible text
+      const visibleText = parts.filter(p => p.text && !p.thought).map(p => p.text).join('').trim();
+      let responseText = visibleText || "Kechirasiz, men buni tushunmadim.";
 
       if (userContext) {
         await appendHistory(userContext, 'user', message);
