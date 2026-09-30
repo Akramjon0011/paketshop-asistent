@@ -22,18 +22,27 @@ function availability(note: string | null): 'in_stock' | 'low_stock' | 'check_wi
   return 'check_with_manager';
 }
 
+// "3850000" -> "3 850 000": ready-to-copy text, so the model doesn't have to regroup digits (where it once slipped)
+const grouped = (n: number | null) => (n === null || !Number.isFinite(n) ? undefined : n.toLocaleString('en-US').replace(/,/g, ' '));
+
 function compact(r: Row) {
+  const price = r.price_on_request ? null : num(r.price);
+  const perPiece = r.price_on_request ? null : num(r.unit_price);
+  const pieces = num(r.pack_qty);
   return {
     id: r.id,
     sku: r.sku,
     name: r.name,
     name_ru: r.name_ru || undefined,
     category: r.category,
-    price_per_pack: r.price_on_request ? null : num(r.price),
+    price_per_pack: price,
+    price_per_pack_text: grouped(price),
     price_on_request: r.price_on_request ? true : undefined,
     pack_unit: r.pack_unit || 'qadoq',
-    pieces_per_pack: num(r.pack_qty),
-    approx_price_per_piece: r.price_on_request ? null : num(r.unit_price),
+    pieces_per_pack: pieces,
+    pieces_per_pack_text: grouped(pieces),
+    approx_price_per_piece: perPiece,
+    approx_price_per_piece_text: grouped(perPiece),
     availability: availability(r.stock_note),
   };
 }
@@ -159,12 +168,16 @@ export async function calculateQuote(db: Sql, items: QuoteInput[]) {
 
     const lineTotal = price * packs;
     total += lineTotal;
-    lines.push({ product_id: p.id, sku: p.sku, name: p.name, packs, unit, pieces, price_per_pack: price, line_total: lineTotal, note: lineNotes.join('; ') || undefined });
+    lines.push({
+      product_id: p.id, sku: p.sku, name: p.name, packs, unit, pieces, price_per_pack: price, line_total: lineTotal,
+      pieces_text: grouped(pieces), price_per_pack_text: grouped(price), line_total_text: grouped(lineTotal),
+      note: lineNotes.join('; ') || undefined,
+    });
   }
 
   if (unpriced.length) notes.push(`Price on request, NOT included in the total: ${unpriced.join(', ')}`);
   notes.push("This is an estimate: the manager confirms stock and the final price.");
-  return { success: true, lines, total_estimate: total, currency: "so'm", priced_all: unpriced.length === 0, notes };
+  return { success: true, lines, total_estimate: total, total_estimate_text: grouped(total), currency: "so'm", priced_all: unpriced.length === 0, notes };
 }
 
 // ---------- requests (orders that a manager confirms) ----------

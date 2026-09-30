@@ -3,6 +3,7 @@ import { sql, initDb, type Sql } from './db.js';
 import { listProducts, searchProducts, getProduct, calculateQuote, createRequest } from './catalog.js';
 import { SHOP, shopStatusLine } from './shopInfo.js';
 import { recordEvent } from './events.js';
+import { allowNumbersFromText, collectNumbers, findUnverifiedNumbers, formatAmount } from './numberGuard.js';
 
 const geminiKey = process.env.GEMINI_API_KEY;
 export const ai = new GoogleGenAI({ apiKey: geminiKey as string });
@@ -139,7 +140,8 @@ MA'LUMOT MANBAI — ENG MUHIM QOIDA
 3. Har qanday jami summa yoki miqdor hisobini calculate_quote bilan qil. O'zing hisoblama.
 
 NARXLAR
-- Narxlar QADOQ (yoki korobka) uchun. Doim qadoqda nechta dona borligini va taxminiy dona narxini ayt. Masalan: "1 qadoqda 2 300 dona, narxi 3 910 000 so'm, ya'ni dona taxminan 1 700 so'm."
+- Narxlar QADOQ (yoki korobka) uchun. Doim qadoqda nechta dona borligini va taxminiy dona narxini ayt (masalan: "1 qadoqda [soni] dona, narxi [narx] so'm, ya'ni dona taxminan [dona narxi] so'm").
+- Narx, summa va sonlarni funksiya natijalaridan AYNAN ko'chir: raqamni o'zgartirma, yaxlitlama, o'zing hisoblama. Natijadagi *_text maydonlari tayyor yozilgan (bo'shliqli) ko'rinish, ularni o'zgarishsiz ishlat.
 - Hajmga qarab ulgurji narxlar bor (10, 50 va 100+ qadoq), aniq chegirmani menejer tasdiqlaydi. Chegirma va'da qilma. Mahsulotda volume_prices bo'lsa, faqat shuni ayt.
 - price_on_request true bo'lsa (yoki price_per_pack bo'sh): narxni menejer aniqlashini ayt.
 - availability kodlari: in_stock = omborda mavjud, low_stock = qoldiq kam qolgan, check_with_manager = qoldiqni menejer aniqlaydi. Qoldiqni kafolatlama.
@@ -801,13 +803,24 @@ export async function handleConversationalChat(
     ]
   }];
 
+  // Amounts in the answer must come from what the model was given; otherwise it gets one chance to fix them.
+  const allowedNumbers = new Set<number>();
+  allowNumbersFromText(`${message}\n${history.map(h => h.content).join('\n')}\n${ragContext}\n${customerContext}\n${summaryContext}\n${SHOP.phone.replace(/\s/g, '')}`, allowedNumbers);
+  let corrections = 1;
+  let correctionPending = false;
+  let streamedAlready = false;   // text already sent to the client through onChunk (the final reply then replaces it)
+  const correctionRequest = (badNumbers: number[]) => ({
+    role: 'user',
+    parts: [{ text: `Tizim tekshiruvi: javobingdagi ${badNumbers.map(formatAmount).join(', ')} raqam(lar)i sen olgan ma'lumotlarda (funksiya natijalari, bilimlar bazasi, mijoz xabari) yo'q. Narx, summa va sonlarni faqat funksiya natijalaridan AYNAN ko'chir yoki calculate_quote bilan hisobla. Javobni mijoz tilida qaytadan yoz; bu tekshiruv haqida gapirma.` }],
+  });
+
   try {
     let loopCount = 0;
-    while (loopCount < 5) {
+    while (loopCount < 7) {
       loopCount++;
 
       // When tools have already executed (loopCount > 1) and streaming is requested, stream final answer directly!
-      if (loopCount > 1 && onChunk) {
+      if (loopCount > 1 && onChunk && !correctionPending) {
         let streamText = "";
         try {
           const stream = await generateContentStreamResilient({
@@ -844,6 +857,18 @@ export async function handleConversationalChat(
         }
 
         const responseText = streamText || "Kechirasiz, men buni tushunmadim.";
+
+        // The text is already on the customer's screen; if an amount doesn't check out, regenerate and the final reply replaces it
+        streamedAlready = !!streamText;
+        const streamedBad = findUnverifiedNumbers(responseText, allowedNumbers);
+        if (streamedBad.length && corrections > 0) {
+          corrections--;
+          correctionPending = true;
+          await recordEvent('number_check', `unverified ${streamedBad.join(', ')} in: ${responseText.slice(0, 120)}`, 'gemini_events');
+          contents.push({ role: 'model', parts: [{ text: responseText }] }, correctionRequest(streamedBad));
+          continue;
+        }
+
         if (userContext) {
           await appendHistory(userContext, 'user', historyText);
           await appendHistory(userContext, 'model', responseText);
@@ -880,6 +905,7 @@ export async function handleConversationalChat(
         });
 
         const functionResponseData: any = await runTool(name, args, userContext);
+        collectNumbers(functionResponseData, allowedNumbers);
 
         console.log(`🔌 Function ${name} result:`, functionResponseData);
 
@@ -900,7 +926,19 @@ export async function handleConversationalChat(
       const visibleText = parts.filter(p => p.text && !p.thought).map(p => p.text).join('').trim();
       const responseText = visibleText || "Kechirasiz, men buni tushunmadim.";
 
-      if (onChunk && responseText) {
+      const unverified = findUnverifiedNumbers(responseText, allowedNumbers);
+      if (unverified.length) {
+        if (corrections > 0) {
+          corrections--;
+          correctionPending = true;
+          await recordEvent('number_check', `unverified ${unverified.join(', ')} in: ${responseText.slice(0, 120)}`, 'gemini_events');
+          contents.push({ role: 'model', parts: [{ text: responseText }] }, correctionRequest(unverified));
+          continue;
+        }
+        await recordEvent('number_check_failed', `still unverified ${unverified.join(', ')} after a correction`, 'gemini_events');
+      }
+
+      if (onChunk && responseText && !streamedAlready) {
         onChunk(responseText);
       }
 
