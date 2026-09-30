@@ -788,12 +788,61 @@ export async function handleConversationalChatStream(
   return fullText;
 }
 
-// Transcribe raw audio to text using Gemini 2.5 Flash
+// Transcribe raw audio to text.
+// Primary: dedicated Gemini transcribe model (Interactions API). Fallback: general Gemini Flash.
+const TRANSCRIBE_MODEL = 'gemini-3.5-transcribe';
+const TRANSCRIBE_FALLBACK_MODEL = 'gemini-3.8-flash';
+
+function extractInteractionText(data: any): string {
+  if (typeof data?.output_text === 'string') return data.output_text;
+  const parts: string[] = [];
+  const collect = (items: any) => {
+    if (!Array.isArray(items)) return;
+    for (const it of items) {
+      if (it?.type === 'text' && typeof it.text === 'string') parts.push(it.text);
+      else if (Array.isArray(it?.content)) collect(it.content);
+    }
+  };
+  collect(data?.outputs);
+  collect(data?.steps);
+  return parts.join(' ');
+}
+
+async function transcribeWithTranscribeModel(audioBuffer: Buffer, mimeType: string): Promise<string | null> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return null;
+  const res = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
+    method: 'POST',
+    headers: { 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(25000),
+    body: JSON.stringify({
+      model: TRANSCRIBE_MODEL,
+      input: [{ type: 'audio', data: audioBuffer.toString('base64'), mime_type: mimeType.split(';')[0].trim() }],
+      generation_config: {
+        transcription_config: {
+          language_codes: ['uz-UZ', 'ru-RU'],
+          custom_vocabulary: [BRAND.shopName, BRAND.assistantName]
+        }
+      }
+    })
+  });
+  if (!res.ok) {
+    throw new Error(`${TRANSCRIBE_MODEL} HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  }
+  return extractInteractionText(await res.json()).trim() || null;
+}
+
 export async function transcribeAudio(audioBuffer: Buffer, mimeType: string): Promise<string | null> {
+  try {
+    const text = await transcribeWithTranscribeModel(audioBuffer, mimeType);
+    if (text) return text;
+  } catch (err) {
+    console.warn("Transcribe model failed, falling back to Flash:", err);
+  }
   try {
     const base64Data = audioBuffer.toString('base64');
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: TRANSCRIBE_FALLBACK_MODEL,
       contents: [
         {
           role: 'user',
