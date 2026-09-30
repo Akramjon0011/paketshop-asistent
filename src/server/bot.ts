@@ -2,6 +2,7 @@ import { Telegraf, Markup } from "telegraf";
 import { handleConversationalChat, generateSpeech, transcribeAudio, BRAND } from './ai.js';
 import { sql } from './db.js';
 import { spawn } from 'child_process';
+import { createHash } from 'crypto';
 
 // Helper to wrap raw 24kHz 16-bit Mono PCM in a standard WAV container for Telegram playback
 function pcmToWav(pcmBuffer: Buffer, sampleRate = 24000, numChannels = 1, bitsPerSample = 16): Buffer {
@@ -349,6 +350,28 @@ export function setupBot(app: any) {
           // Don't pass res to handleUpdate — forces Telegraf to use standard API
           // method for replies, which is more reliable in serverless environments
           const webhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET;
+
+          // Diagnostics: what Telegram thinks about our webhook (no secrets in the output)
+          let statusMemo: { at: number; body: any } | null = null;
+          app.get('/api/telegram-status', async (_req: any, res: any) => {
+            if (statusMemo && Date.now() - statusMemo.at < 15000) return res.json(statusMemo.body);
+            try {
+              const [me, info] = await Promise.all([bot.telegram.getMe(), bot.telegram.getWebhookInfo()]);
+              const body = {
+                bot: me.username,
+                webhookUrl: info.url,
+                expectedUrl: webhookUrl,
+                hasSecret: !!webhookSecret,
+                pendingUpdates: info.pending_update_count,
+                lastErrorDate: info.last_error_date ? new Date(info.last_error_date * 1000).toISOString() : null,
+                lastErrorMessage: info.last_error_message || null
+              };
+              statusMemo = { at: Date.now(), body };
+              res.json(body);
+            } catch (err) {
+              res.status(500).json({ error: describeErr(err) });
+            }
+          });
           app.post(webhookPath, async (req: any, res: any) => {
             if (webhookSecret && req.headers['x-telegram-bot-api-secret-token'] !== webhookSecret) {
               return res.status(401).json({ ok: false });
@@ -374,7 +397,8 @@ export function setupBot(app: any) {
                 return;
               }
               const cached = await sql`SELECT value FROM app_settings WHERE key = 'telegram_webhook_url'`;
-              const cacheKey = webhookUrl + (webhookSecret ? '#s' : '');
+              // Key covers URL, secret and bot token, so rotating either re-registers the webhook
+              const cacheKey = createHash('sha256').update(`${webhookUrl}|${webhookSecret || ''}|${botToken}`).digest('hex').slice(0, 24);
               if (cached.length > 0 && cached[0].value === cacheKey) {
                 return; // already set, skip API call
               }
