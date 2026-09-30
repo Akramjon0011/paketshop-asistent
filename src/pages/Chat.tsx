@@ -444,9 +444,12 @@ export default function Chat() {
         { id: modelMessageId, role: 'model', content: replyText }
       ]);
 
-      // Play returning TTS audio if enabled
-      if (isAudioEnabled && data.audio) {
-        playPCMBase64(data.audio, modelMessageId);
+      // Show the reply first; the voice is generated afterwards without blocking the chat
+      setIsLoading(false);
+      if (isAudioEnabled) {
+        generateSpeech(replyText)
+          .then(audioData => { if (audioData) playPCMBase64(audioData, modelMessageId); })
+          .catch(audioErr => console.error("TTS generation failed after voice message:", audioErr));
       }
     } catch (err: any) {
       console.error(err);

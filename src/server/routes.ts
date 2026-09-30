@@ -567,7 +567,9 @@ router.post("/chat/voice", aiLimiter, uploadMemory.single('audio'), async (req, 
     const mimeType = req.file.mimetype || 'audio/webm';
     console.log(`🎙️ Web voice message upload received: size=${req.file.size} bytes, mime=${mimeType}`);
     
+    const sttStart = Date.now();
     const transcribedText = await transcribeAudio(req.file.buffer, mimeType);
+    const sttMs = Date.now() - sttStart;
     if (!transcribedText) {
       return res.status(400).json({ error: "Ovozli xabarni eshitib bo'lmadi. Iltimos qaytadan yozib ko'ring." });
     }
@@ -575,25 +577,15 @@ router.post("/chat/voice", aiLimiter, uploadMemory.single('audio'), async (req, 
     console.log(`🎙️ Transcribed voice to: "${transcribedText}"`);
 
     // 2. Feed text into conversational chat
+    const chatStart = Date.now();
     const replyText = await handleConversationalChat(transcribedText, history, { webSessionId });
+    res.set('Server-Timing', `stt;dur=${sttMs}, chat;dur=${Date.now() - chatStart}`);
 
-    // 3. Clean and convert reply text to TTS audio
-    const speechText = replyText
-      .replace(/\[IMAGE: (.*?)\]/g, '')
-      .replace(/\[VIDEO: (.*?)\]/g, '')
-      .replace(/https?:\/\/[^\s]+/g, '') // remove URLs
-      .replace(/[#_*\[\]]/g, '')        // remove styling characters
-      .trim();
-
-    let voiceBase64 = null;
-    if (speechText) {
-      voiceBase64 = await generateSpeech(speechText);
-    }
-
+    // The reply text is returned right away; the client requests the voice separately via /api/tts
+    // (running TTS here made the user wait for it before seeing anything).
     res.json({
       transcription: transcribedText,
-      reply: replyText,
-      audio: voiceBase64 // Base64 PCM data
+      reply: replyText
     });
 
   } catch (err) {
