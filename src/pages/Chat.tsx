@@ -93,10 +93,11 @@ export default function Chat() {
   const audioChunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
-    let id = localStorage.getItem('webSessionId');
+    let id: string | null = null;
+    try { id = localStorage.getItem('webSessionId'); } catch { /* storage blocked in some webviews */ }
     if (!id) {
       id = 'session_' + Math.random().toString(36).substring(2, 15) + '_' + Date.now();
-      localStorage.setItem('webSessionId', id);
+      try { localStorage.setItem('webSessionId', id); } catch { /* ignore */ }
     }
     setWebSessionId(id);
   }, []);

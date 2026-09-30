@@ -29,7 +29,7 @@ async function uploadToCloudinary(buffer: Buffer, folder: string): Promise<strin
 
 // Basic health check endpoint
 router.get("/health", (req, res) => {
-  res.json({ status: "ok", commit: process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) });
+  res.json({ status: "ok", commit: process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7), webAppUrl: process.env.APP_URL });
 });
 
 // Public: featured products for the chat carousel — latest 6 + top-sold 6
