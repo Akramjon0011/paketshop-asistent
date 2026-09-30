@@ -1,5 +1,8 @@
 {
   "version": 2,
+  "crons": [
+    { "path": "/api/cron/sync-catalog", "schedule": "0 3 * * *" }
+  ],
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/index.ts" },
     { "source": "/(.*)", "destination": "/index.html" }

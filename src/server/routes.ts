@@ -2,7 +2,9 @@ import express from 'express';
 import multer from 'multer';
 import { v2 as cloudinary } from 'cloudinary';
 import { sql, initDb } from './db.js';
-import { generateEmbedding, searchKnowledgeBase, handleConversationalChat, handleConversationalChatStream, transcribeAudio, generateSpeech, generateSpeechDetailed, TTS_MODELS, BRAND, BRAND_GREETING, appendHistory } from './ai.js';
+import { generateEmbedding, generateEmbeddingsBatch, searchKnowledgeBase, handleConversationalChat, handleConversationalChatStream, transcribeAudio, generateSpeech, generateSpeechDetailed, TTS_MODELS, BRAND, BRAND_GREETING, appendHistory } from './ai.js';
+import { runScheduledSync } from './scheduledSync.js';
+import { timingSafeEqual } from 'crypto';
 import { GoogleGenAI } from "@google/genai";
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -39,6 +41,19 @@ async function uploadToCloudinary(buffer: Buffer, folder: string): Promise<strin
 // Basic health check endpoint
 router.get("/health", (req, res) => {
   res.json({ status: "ok", commit: process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7), webAppUrl: process.env.APP_URL });
+});
+
+// Vercel Cron (see vercel.json) refreshes products and knowledge from paketshop.uz every morning.
+// Vercel sends "Authorization: Bearer <CRON_SECRET>" when the CRON_SECRET environment variable is set.
+router.get("/cron/sync-catalog", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) return res.status(503).json({ error: "CRON_SECRET is not configured" });
+  const given = Buffer.from(String(req.headers.authorization ?? ''));
+  const expected = Buffer.from(`Bearer ${secret}`);
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return res.status(401).json({ error: "Unauthorized" });
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  await initDb();
+  res.json(await runScheduledSync(sql, { embed: generateEmbeddingsBatch }));
 });
 
 // Public: GET single product details by id

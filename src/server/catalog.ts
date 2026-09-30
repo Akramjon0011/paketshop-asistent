@@ -1,6 +1,7 @@
 // Catalog access for the assistant (list / search / details / quotes / requests) and the paketshop.uz sync.
 // Every function takes the database handle as a parameter so it can be tested without a live Neon connection.
 
+import { createHash } from 'crypto';
 import type { Sql } from './db.js';
 import { fetchInfoSections, fetchProducts, type SiteProduct, type SiteSection } from './paketshop.js';
 import { notifyNewRequest } from './notify.js';
@@ -262,13 +263,25 @@ export type SyncPlan = {
   site: SiteData;
   kbEntries: { question: string; answer: string }[];
   newProducts: string[];
-  changed: { sku: string; name: string; changes: string[] }[];
+  changed: { sku: string; name: string; changes: string[] }[];   // price / stock note / name changes worth telling the manager
+  contentChanged: number;   // other fields changed (description, photo, pack sizes, ...)
   unchanged: number;
   deactivate: { id: number; name: string }[];
   firstSync: boolean;
+  existingSiteProducts: number;   // active products already imported from the site
   oldKbEntries: number;
+  kbChanged: boolean;       // the imported knowledge entries differ from what is stored
+  needsWrite: boolean;      // anything at all to write (products or knowledge)
   problems: string[];       // reasons why applying would be refused
 };
+
+// Everything the sync stores for a product; a different fingerprint means the site changed something
+export function fingerprint(p: SiteProduct): string {
+  const fields = [p.name, p.description, p.price, p.image_url, p.category, p.url, p.name_ru, p.description_ru, p.category_ru,
+    p.price_on_request, p.pack_unit, p.pack_qty, p.pack_qty_unit, p.packs_per_box, p.box_qty, p.unit_price, p.min_order,
+    p.price_tiers, p.stock_note];
+  return createHash('sha1').update(JSON.stringify(fields)).digest('hex');
+}
 
 export async function readSite(): Promise<SiteData> {
   const [{ products, errors }, { sections, errors: e2 }] = await Promise.all([fetchProducts(), fetchInfoSections()]);
@@ -293,23 +306,29 @@ function catalogOverview(products: SiteProduct[]): { question: string; answer: s
 
 export async function planCatalogSync(db: Sql, site?: SiteData): Promise<SyncPlan> {
   const data = site ?? await readSite();
-  const existing = await db`SELECT id, sku, name, price, stock_note, active, source FROM products`;
+  const existing = await db`SELECT id, sku, name, price, stock_note, active, source, sync_hash FROM products`;
   const bySku = new Map<string, Row>(existing.filter(r => r.sku).map(r => [r.sku as string, r]));
   const siteSkus = new Set(data.products.map(p => p.sku!));
 
   const newProducts: string[] = [];
   const changed: SyncPlan['changed'] = [];
+  let contentChanged = 0;
   let unchanged = 0;
+  let productsNeedWrite = false;
   for (const p of data.products) {
     const old = bySku.get(p.sku!);
-    if (!old) { newProducts.push(`${p.sku} — ${p.name}`); continue; }
+    if (!old) { newProducts.push(`${p.sku} — ${p.name}`); productsNeedWrite = true; continue; }
     const changes: string[] = [];
     const oldPrice = old.price === null ? null : Number(old.price);
     if ((p.price ?? 0) !== (oldPrice ?? 0)) changes.push(`narx ${oldPrice ?? '—'} → ${p.price ?? 'narxsiz'}`);
     if ((p.stock_note ?? null) !== (old.stock_note ?? null)) changes.push(`holat "${old.stock_note ?? '—'}" → "${p.stock_note ?? '—'}"`);
     if (p.name !== old.name) changes.push('nomi');
     if (!old.active) changes.push('qayta faollashadi');
-    if (changes.length) changed.push({ sku: p.sku!, name: p.name, changes }); else unchanged++;
+    const hashDiffers = old.sync_hash !== fingerprint(p);
+    if (hashDiffers) productsNeedWrite = true;
+    if (changes.length) changed.push({ sku: p.sku!, name: p.name, changes });
+    else if (hashDiffers && old.sync_hash) contentChanged++;   // a missing hash (rows synced before hashes existed) is not a change
+    else unchanged++;
   }
 
   const firstSync = !existing.some(r => r.source === SOURCE);
@@ -322,14 +341,23 @@ export async function planCatalogSync(db: Sql, site?: SiteData): Promise<SyncPla
     ...data.sections.map(s => ({ question: s.question, answer: s.answer })),
     ...catalogOverview(data.products),
   ];
-  const oldKb = await db`SELECT COUNT(*)::int AS n FROM knowledge_base WHERE source = ${SOURCE}`;
+  const oldKbRows = await db`SELECT question, answer FROM knowledge_base WHERE source = ${SOURCE}`;
+  const kbKey = (e: { question: string; answer: string }) => `${e.question}\u0000${e.answer}`;
+  const oldKbKeys = new Set(oldKbRows.map(r => kbKey(r as any)));
+  const kbChanged = oldKbRows.length !== kbEntries.length || kbEntries.some(e => !oldKbKeys.has(kbKey(e)));
+  const existingSiteProducts = existing.filter(r => r.source === SOURCE && r.active !== false).length;
 
   const problems: string[] = [];
   if (data.products.length < 10) problems.push(`Saytdan faqat ${data.products.length} ta mahsulot o'qildi (kamida 10 kerak)`);
   if (data.sections.length < 10) problems.push(`Saytdan faqat ${data.sections.length} ta ma'lumot bo'limi o'qildi (kamida 10 kerak)`);
   if (data.errors.length > 5) problems.push(`Saytni o'qishda ${data.errors.length} ta xato bo'ldi`);
 
-  return { site: data, kbEntries, newProducts, changed, unchanged, deactivate, firstSync, oldKbEntries: oldKb[0].n, problems };
+  return {
+    site: data, kbEntries, newProducts, changed, contentChanged, unchanged, deactivate, firstSync, existingSiteProducts,
+    oldKbEntries: oldKbRows.length, kbChanged,
+    needsWrite: productsNeedWrite || deactivate.length > 0 || kbChanged,
+    problems,
+  };
 }
 
 export type Embedder = (texts: string[]) => Promise<(number[] | null)[]>;
@@ -337,8 +365,8 @@ export type Embedder = (texts: string[]) => Promise<(number[] | null)[]>;
 export async function applyCatalogSync(db: Sql, plan: SyncPlan, embed: Embedder) {
   if (plan.problems.length) throw new Error(`Sinxronlash to'xtatildi: ${plan.problems.join('; ')}`);
 
-  // Embeddings first (network), so the database transaction below stays short
-  const vectors = await embed(plan.kbEntries.map(e => `${e.question} ${e.answer}`.slice(0, 3000)));
+  // Embeddings first (network), so the database transaction below stays short. Skipped when the knowledge text is unchanged.
+  const vectors = plan.kbChanged ? await embed(plan.kbEntries.map(e => `${e.question} ${e.answer}`.slice(0, 3000))) : [];
   const embedded = vectors.filter(Boolean).length;
 
   const statements: any[] = [];
@@ -346,10 +374,10 @@ export async function applyCatalogSync(db: Sql, plan: SyncPlan, embed: Embedder)
     statements.push(db`
       INSERT INTO products (sku, name, description, price, image_url, category, stock, url, name_ru, description_ru, category_ru,
         price_on_request, pack_unit, pack_qty, pack_qty_unit, packs_per_box, box_qty, unit_price, min_order, price_tiers, stock_note,
-        source, active, synced_at)
+        source, active, synced_at, sync_hash)
       VALUES (${p.sku}, ${p.name}, ${p.description}, ${p.price ?? 0}, ${p.image_url}, ${p.category}, 999999, ${p.url}, ${p.name_ru}, ${p.description_ru}, ${p.category_ru},
         ${p.price_on_request}, ${p.pack_unit}, ${p.pack_qty}, ${p.pack_qty_unit}, ${p.packs_per_box}, ${p.box_qty}, ${p.unit_price}, ${p.min_order},
-        ${JSON.stringify(p.price_tiers)}::jsonb, ${p.stock_note}, ${SOURCE}, TRUE, CURRENT_TIMESTAMP)
+        ${JSON.stringify(p.price_tiers)}::jsonb, ${p.stock_note}, ${SOURCE}, TRUE, CURRENT_TIMESTAMP, ${fingerprint(p)})
       ON CONFLICT (sku) DO UPDATE SET
         name = EXCLUDED.name, description = EXCLUDED.description, price = EXCLUDED.price, image_url = EXCLUDED.image_url,
         category = EXCLUDED.category, stock = EXCLUDED.stock, url = EXCLUDED.url, name_ru = EXCLUDED.name_ru,
@@ -357,16 +385,18 @@ export async function applyCatalogSync(db: Sql, plan: SyncPlan, embed: Embedder)
         pack_unit = EXCLUDED.pack_unit, pack_qty = EXCLUDED.pack_qty, pack_qty_unit = EXCLUDED.pack_qty_unit,
         packs_per_box = EXCLUDED.packs_per_box, box_qty = EXCLUDED.box_qty, unit_price = EXCLUDED.unit_price,
         min_order = EXCLUDED.min_order, price_tiers = EXCLUDED.price_tiers, stock_note = EXCLUDED.stock_note,
-        source = EXCLUDED.source, active = TRUE, synced_at = CURRENT_TIMESTAMP`);
+        source = EXCLUDED.source, active = TRUE, synced_at = CURRENT_TIMESTAMP, sync_hash = EXCLUDED.sync_hash`);
   }
   if (plan.deactivate.length) {
     statements.push(db`UPDATE products SET active = FALSE WHERE id = ANY(${plan.deactivate.map(d => d.id)}::int[])`);
   }
-  statements.push(db`DELETE FROM knowledge_base WHERE source = ${SOURCE}`);
-  plan.kbEntries.forEach((e, i) => {
-    const vec = vectors[i] ? `[${vectors[i]!.join(',')}]` : null;
-    statements.push(db`INSERT INTO knowledge_base (question, answer, embedding, source) VALUES (${e.question}, ${e.answer}, ${vec}::vector, ${SOURCE})`);
-  });
+  if (plan.kbChanged) {
+    statements.push(db`DELETE FROM knowledge_base WHERE source = ${SOURCE}`);
+    plan.kbEntries.forEach((e, i) => {
+      const vec = vectors[i] ? `[${vectors[i]!.join(',')}]` : null;
+      statements.push(db`INSERT INTO knowledge_base (question, answer, embedding, source) VALUES (${e.question}, ${e.answer}, ${vec}::vector, ${SOURCE})`);
+    });
+  }
 
   await db.transaction(statements);
   return {
@@ -374,7 +404,8 @@ export async function applyCatalogSync(db: Sql, plan: SyncPlan, embed: Embedder)
     added: plan.newProducts.length,
     changed: plan.changed.length,
     deactivated: plan.deactivate.length,
-    knowledge: plan.kbEntries.length,
+    knowledge: plan.kbChanged ? plan.kbEntries.length : plan.oldKbEntries,
+    knowledgeUpdated: plan.kbChanged,
     embedded,
   };
 }

@@ -8,7 +8,7 @@ export const sql = process.env.DATABASE_URL ? neon(process.env.DATABASE_URL) : n
 export type Sql = NonNullable<typeof sql>;
 
 // Bump when the DDL below changes; cold starts skip all DDL when the stored version matches.
-const SCHEMA_VERSION = '2026-09-30-b2b-catalog';
+const SCHEMA_VERSION = '2026-09-30-b2b-catalog-2';
 
 // All DDL for the schema, run as one transaction (one round trip instead of ~30)
 export function schemaStatements(db: Sql) {
@@ -56,6 +56,7 @@ export function schemaStatements(db: Sql) {
     db`ALTER TABLE products ADD COLUMN IF NOT EXISTS source TEXT`,
     db`ALTER TABLE products ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`,
     db`ALTER TABLE products ADD COLUMN IF NOT EXISTS synced_at TIMESTAMP`,
+    db`ALTER TABLE products ADD COLUMN IF NOT EXISTS sync_hash TEXT`,
     db`CREATE UNIQUE INDEX IF NOT EXISTS idx_products_sku ON products(sku)`,
 
     // Orders double as the assistant's "requests" (a manager confirms stock and the final price)
