@@ -542,19 +542,94 @@ export async function getKnowledgeBaseContext() {
 }
 
 // Generate TTS speech audio from text using Gemini 3.1
+const TTS_MODEL = 'gemini-3.8-flash-tts';
+const TTS_FALLBACK_MODEL = 'gemini-3.1-flash-tts-preview';
+const TTS_SAMPLE_RATE = 24000;
+
+// Depth-first search for the first audio payload in an Interactions API response
+function findAudioData(node: any): string | null {
+  if (!node || typeof node !== 'object') return null;
+  if (typeof node.data === 'string' && (node.type === 'audio' || String(node.mime_type || '').startsWith('audio/'))) {
+    return node.data;
+  }
+  for (const value of Object.values(node)) {
+    const found = findAudioData(value);
+    if (found) return found;
+  }
+  return null;
+}
+
+// gemini-3.8 TTS returns WAV with a RIFF header; the web player and Telegram pipeline expect raw 24kHz 16-bit mono PCM
+function wavToPcm(buf: Buffer): Buffer {
+  if (buf.length < 12 || buf.toString('ascii', 0, 4) !== 'RIFF') return buf;
+  let offset = 12;
+  while (offset + 8 <= buf.length) {
+    const id = buf.toString('ascii', offset, offset + 4);
+    const size = buf.readUInt32LE(offset + 4);
+    if (id === 'fmt ') {
+      const rate = buf.readUInt32LE(offset + 12);
+      if (rate !== TTS_SAMPLE_RATE) console.warn(`TTS sample rate is ${rate}, expected ${TTS_SAMPLE_RATE}`);
+    } else if (id === 'data') {
+      const start = offset + 8;
+      const end = size === 0xFFFFFFFF ? buf.length : Math.min(start + size, buf.length);
+      return buf.subarray(start, end);
+    }
+    offset += 8 + size + (size % 2);
+  }
+  return buf.subarray(44);
+}
+
+async function synthesizeWithTtsModel(text: string): Promise<string | null> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return null;
+  const res = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
+    method: 'POST',
+    headers: { 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(30000),
+    body: JSON.stringify({
+      model: TTS_MODEL,
+      input: [{
+        type: 'user_input',
+        content: [{
+          type: 'text',
+          text,
+          annotations: [{ type: 'speech_metadata', style: 'warm, friendly, natural conversational tone of a helpful young shop consultant' }]
+        }]
+      }],
+      response_format: { type: 'audio', mime_type: 'audio/wav', sample_rate: TTS_SAMPLE_RATE },
+      generation_config: { speech_config: [{ voice: 'Kore' }] }
+    })
+  });
+  if (!res.ok) {
+    throw new Error(`${TTS_MODEL} HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  }
+  const audio = findAudioData(await res.json());
+  if (!audio) return null;
+  return wavToPcm(Buffer.from(audio, 'base64')).toString('base64');
+}
+
 export async function generateSpeech(text: string): Promise<string | null> {
+  const cleanText = text
+    .replace(/\[IMAGE:\s*(.*?)\]/gi, '')
+    .replace(/\[VIDEO:\s*(.*?)\]/gi, '')
+    .replace(/\[BUYURTMA:\s*(.*?)\]/gi, '')
+    .replace(/https?:\/\/[^\s]+/gi, '')
+    .replace(/\[[^\]]*\]/g, '')   // gemini-3.8 TTS reads text verbatim, so drop leftover [tags]
+    .replace(/[#*_]/g, '')
+    .trim();
+
+  if (!cleanText) return null;
+
   try {
-    const cleanText = text
-      .replace(/\[IMAGE:\s*(.*?)\]/gi, '')
-      .replace(/\[VIDEO:\s*(.*?)\]/gi, '')
-      .replace(/\[BUYURTMA:\s*(.*?)\]/gi, '')
-      .replace(/https?:\/\/[^\s]+/gi, '')
-      .trim();
+    const pcm = await synthesizeWithTtsModel(cleanText);
+    if (pcm) return pcm;
+  } catch (err) {
+    console.warn("TTS model failed, falling back to preview model:", err);
+  }
 
-    if (!cleanText) return null;
-
+  try {
     const response = await ai.models.generateContent({
-      model: 'gemini-3.1-flash-tts-preview',
+      model: TTS_FALLBACK_MODEL,
       contents: [{ parts: [{ text: cleanText }] }],
       config: {
         responseModalities: [Modality.AUDIO],

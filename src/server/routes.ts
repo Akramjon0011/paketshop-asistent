@@ -500,6 +500,21 @@ router.post("/chat/stream", aiLimiter, async (req, res) => {
   }
 });
 
+// 1.3. Text-to-speech for the web chat (keeps the Gemini key on the server)
+router.post("/tts", aiLimiter, async (req, res) => {
+  const { text } = req.body;
+  if (typeof text !== 'string' || !text.trim() || text.length > 2000) {
+    return res.status(400).json({ error: "Matn noto'g'ri yoki juda uzun" });
+  }
+  try {
+    const audio = await generateSpeech(text);
+    res.json({ audio });
+  } catch (err) {
+    console.error("TTS route error:", err);
+    res.status(500).json({ error: "Ovoz yaratib bo'lmadi" });
+  }
+});
+
 // 1.1. Reset conversation for a web session
 router.post("/chat/reset", async (req, res) => {
   if (!sql) return res.status(500).json({ error: "Database not connected" });
