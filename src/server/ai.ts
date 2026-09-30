@@ -4,6 +4,35 @@ import { sql } from './db.js';
 const geminiKey = process.env.GEMINI_API_KEY;
 export const ai = new GoogleGenAI({ apiKey: geminiKey as string });
 
+export const CHAT_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+// Used when the primary model keeps answering 503/429 (high demand spikes)
+export const CHAT_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.5-flash-lite';
+
+function isTransientGeminiError(err: any): boolean {
+  const status = Number(err?.status ?? err?.code);
+  if ([429, 500, 502, 503, 504].includes(status)) return true;
+  return /UNAVAILABLE|high demand|overloaded|RESOURCE_EXHAUSTED|fetch failed|ETIMEDOUT|ECONNRESET/i.test(String(err?.message || err));
+}
+
+// generateContent with one quick retry on the primary model, then one attempt (plus retry) on the fallback model
+export async function generateContentResilient(params: Parameters<typeof ai.models.generateContent>[0]) {
+  const models = [params.model, CHAT_FALLBACK_MODEL].filter((m, i, arr) => m && arr.indexOf(m) === i);
+  let lastErr: any;
+  for (const model of models) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await ai.models.generateContent({ ...params, model });
+      } catch (err) {
+        lastErr = err;
+        if (!isTransientGeminiError(err)) throw err;
+        console.warn(`Gemini ${model} transient error (attempt ${attempt + 1}):`, (err as any)?.status ?? '', String((err as any)?.message || err).slice(0, 120));
+        if (attempt === 0) await new Promise(r => setTimeout(r, 700));
+      }
+    }
+  }
+  throw lastErr;
+}
+
 export const BRAND = {
   shopName: process.env.SHOP_NAME || "Paketshop.uz",
   assistantName: process.env.ASSISTANT_NAME || "Malika",
@@ -405,8 +434,8 @@ ${existingSummary ? `Avvalgi xulosa:\n${existingSummary}\n\nYangi suhbat:\n` : '
 
 Yangilangan xulosa:`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+    const response = await generateContentResilient({
+      model: CHAT_MODEL,
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
     });
     const newSummary = response.text?.trim() || existingSummary;
@@ -753,8 +782,8 @@ Qoida: Mijozni samimiy tarzda ismi bilan chaqirib salomlashing. Agar mijoz buyur
     let loopCount = 0;
     while (loopCount < 5) {
       loopCount++;
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
+      const response = await generateContentResilient({
+        model: CHAT_MODEL,
         contents: contents,
         config: {
           systemInstruction: fullSystemInstruction,
@@ -866,7 +895,7 @@ export async function handleConversationalChatStream(
 // Transcribe raw audio to text.
 // Primary: dedicated Gemini transcribe model (Interactions API). Fallback: general Gemini Flash.
 const TRANSCRIBE_MODEL = 'gemini-3.5-transcribe';
-const TRANSCRIBE_FALLBACK_MODEL = 'gemini-3.8-flash';
+const TRANSCRIBE_FALLBACK_MODEL = CHAT_MODEL;
 
 function extractInteractionText(data: any): string {
   if (typeof data?.output_text === 'string') return data.output_text;
@@ -916,7 +945,7 @@ export async function transcribeAudio(audioBuffer: Buffer, mimeType: string): Pr
   }
   try {
     const base64Data = audioBuffer.toString('base64');
-    const response = await ai.models.generateContent({
+    const response = await generateContentResilient({
       model: TRANSCRIBE_FALLBACK_MODEL,
       contents: [
         {

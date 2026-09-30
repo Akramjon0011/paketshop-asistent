@@ -75,6 +75,11 @@ function pcmToOggOpus(pcmBuffer: Buffer, sampleRate = 24000): Promise<Buffer> {
   });
 }
 
+// Telegraf errors embed the request payload (including the webhook secret) — log only the description
+function describeErr(err: any): string {
+  return err?.response?.description ? `${err.response.error_code} ${err.response.description}` : String(err?.message || err);
+}
+
 export function setupBot(app: any) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken || botToken === 'MY_TELEGRAM_BOT_TOKEN') {
@@ -354,7 +359,7 @@ export function setupBot(app: any) {
               await bot.handleUpdate(req.body);
               console.log(`✅ Update #${updateId} processed`);
             } catch (err) {
-              console.error(`❌ Update #${updateId} error:`, err);
+              console.error(`❌ Update #${updateId} error:`, describeErr(err));
             }
             res.status(200).json({ ok: true });
           });
@@ -381,7 +386,7 @@ export function setupBot(app: any) {
               `;
               console.log("✅ Vercel Webhook updated to", webhookUrl);
             } catch (err) {
-              console.error("❌ Failed to set webhook:", err);
+              console.error("❌ Failed to set webhook:", describeErr(err));
             }
           })();
       } else {
