@@ -1,7 +1,7 @@
 import { Telegraf, Markup } from "telegraf";
 import { handleConversationalChat, generateSpeech, transcribeAudio, BRAND } from './ai.js';
 import { sql } from './db.js';
-import { spawn } from 'child_process';
+import { Mp3Encoder } from '@breezystack/lamejs';
 import { createHash } from 'crypto';
 
 // Helper to wrap raw 24kHz 16-bit Mono PCM in a standard WAV container for Telegram playback
@@ -38,42 +38,23 @@ function pcmToWav(pcmBuffer: Buffer, sampleRate = 24000, numChannels = 1, bitsPe
   return Buffer.concat([header, pcmBuffer]);
 }
 
-// Convert raw PCM to OGG/Opus using FFmpeg
-function pcmToOggOpus(pcmBuffer: Buffer, sampleRate = 24000): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const ffmpeg = spawn('ffmpeg', [
-      '-f', 's16le',
-      '-ar', String(sampleRate),
-      '-ac', '1',
-      '-i', 'pipe:0',
-      '-c:a', 'libopus',
-      '-b:a', '32k',
-      '-f', 'ogg',
-      'pipe:1'
-    ]);
-
-    const chunks: Buffer[] = [];
-    const errChunks: Buffer[] = [];
-
-    ffmpeg.stdout.on('data', (chunk) => chunks.push(chunk));
-    ffmpeg.stderr.on('data', (chunk) => errChunks.push(chunk));
-
-    ffmpeg.on('close', (code) => {
-      if (code === 0) {
-        resolve(Buffer.concat(chunks));
-      } else {
-        const errStr = Buffer.concat(errChunks).toString();
-        reject(new Error(`FFmpeg exited with code ${code}. Error: ${errStr}`));
-      }
-    });
-
-    ffmpeg.on('error', (err) => {
-      reject(err);
-    });
-
-    ffmpeg.stdin.write(pcmBuffer);
-    ffmpeg.stdin.end();
-  });
+// Encode raw 24kHz 16-bit mono PCM to MP3 in pure JS. Telegram plays an MP3 sent via sendVoice as a voice message,
+// and there is no ffmpeg binary on Vercel.
+function pcmToMp3(pcmBuffer: Buffer, sampleRate = 24000, kbps = 48): Buffer {
+  const sampleCount = Math.floor(pcmBuffer.length / 2);
+  // slice() copies, which also guarantees the 2-byte alignment Int16Array needs
+  const samples = new Int16Array(pcmBuffer.buffer.slice(pcmBuffer.byteOffset, pcmBuffer.byteOffset + sampleCount * 2));
+  const encoder = new Mp3Encoder(1, sampleRate, kbps);
+  const chunks: Buffer[] = [];
+  const push = (out: Int8Array | Uint8Array) => {
+    if (out.length) chunks.push(Buffer.from(out.buffer, out.byteOffset, out.byteLength));
+  };
+  const blockSize = 1152 * 8;
+  for (let i = 0; i < samples.length; i += blockSize) {
+    push(encoder.encodeBuffer(samples.subarray(i, i + blockSize)));
+  }
+  push(encoder.flush());
+  return Buffer.concat(chunks);
 }
 
 // Telegraf errors embed the request payload (including the webhook secret) — log only the description
@@ -129,6 +110,11 @@ export function setupBot(app: any) {
     console.log("ℹ️ Telegram Web App Menu Button registration skipped (only HTTPS URLs are allowed by Telegram).");
   }
   
+  // Lets the shop owner find the ID to put in ADMIN_TELEGRAM_ID (new-order notifications)
+  bot.command('id', async (ctx) => {
+    await ctx.reply(`Sizning Telegram ID: ${ctx.from.id}\n\nYangi buyurtma xabarlarini olish uchun shu raqamni ADMIN_TELEGRAM_ID muhit o'zgaruvchisiga yozing.`);
+  });
+
   bot.command('reset', async (ctx) => {
     if (sql) {
       try {
@@ -186,10 +172,10 @@ export function setupBot(app: any) {
       if (voiceBase64) {
          const pcmBuffer = Buffer.from(voiceBase64, 'base64');
          try {
-            const oggBuffer = await pcmToOggOpus(pcmBuffer);
-            await ctx.replyWithVoice({ source: oggBuffer, filename: 'welcome.ogg' });
-         } catch (oggErr) {
-            console.warn("FFmpeg conversion failed on start, falling back to WAV audio player:", oggErr);
+            await ctx.replyWithVoice({ source: pcmToMp3(pcmBuffer), filename: 'welcome.mp3' });
+         } catch (voiceSendErr) {
+            console.warn("Voice (MP3) failed on start, falling back to WAV audio player:", describeErr(voiceSendErr));
+            await recordBotEvent('start_voice_mp3_failed', describeErr(voiceSendErr));
             const wavBuffer = pcmToWav(pcmBuffer);
             await ctx.replyWithAudio({ source: wavBuffer, filename: 'welcome.wav' }, { title: BRAND.assistantName, performer: BRAND.shopName });
          }
@@ -312,10 +298,10 @@ export function setupBot(app: any) {
             if (voiceBase64) {
                const pcmBuffer = Buffer.from(voiceBase64, 'base64');
                try {
-                  const oggBuffer = await pcmToOggOpus(pcmBuffer);
-                  await ctx.telegram.sendVoice(chatId, { source: oggBuffer, filename: 'voice.ogg' }, replyOptions);
-               } catch (oggErr) {
-                  console.warn("FFmpeg conversion failed, falling back to WAV audio player:", oggErr);
+                  await ctx.telegram.sendVoice(chatId, { source: pcmToMp3(pcmBuffer), filename: 'voice.mp3' }, replyOptions);
+               } catch (voiceSendErr) {
+                  console.warn("Voice (MP3) failed, falling back to WAV audio player:", describeErr(voiceSendErr));
+                  await recordBotEvent('voice_mp3_failed', describeErr(voiceSendErr));
                   const wavBuffer = pcmToWav(pcmBuffer);
                   await ctx.telegram.sendAudio(chatId, { source: wavBuffer, filename: 'voice.wav' }, {
                      ...replyOptions,

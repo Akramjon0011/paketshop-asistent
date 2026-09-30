@@ -1,5 +1,6 @@
 import { GoogleGenAI, Modality, ThinkingLevel } from "@google/genai";
 import { sql } from './db.js';
+import { notifyNewOrder } from './notify.js';
 
 const geminiKey = process.env.GEMINI_API_KEY;
 export const ai = new GoogleGenAI({ apiKey: geminiKey as string });
@@ -340,6 +341,16 @@ export async function dbCreateOrder(
     } catch (crmErr) {
       console.error("CRM Sync failed in dbCreateOrder:", crmErr);
     }
+
+    await notifyNewOrder({
+      orderId: orderRes[0].id,
+      customerName: customer_name,
+      customerPhone: customer_phone,
+      deliveryAddress: delivery_address,
+      items: enrichedItems,
+      total: orderRes[0].total_price,
+      source: telegramId ? 'Telegram bot' : webSessionId ? 'Veb-sayt' : "Noma'lum"
+    });
 
     return {
       success: true,
