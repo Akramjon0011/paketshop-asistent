@@ -313,6 +313,10 @@ Bilimlar bazasi: ${res.knowledge} bo'lim (${res.embedded} tasi qidiruvga tayyor)
           .replace(/\[laughing\]/gi, "😄")
           .replace(/\[short pause\]/gi, "...")
           .replace(/\[sigh\]/gi, "😌")
+          .replace(/\*\*(.+?)\*\*/gs, '$1')   // Telegram text has no markdown: drop **bold** the model sometimes adds
+          .replace(/__(.+?)__/gs, '$1')
+          .replace(/^#{1,6}\s+/gm, '')
+          .replace(/\n{3,}/g, '\n\n')
           .trim();
 
       if (videoUrls.length > 0) {

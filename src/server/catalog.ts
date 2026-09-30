@@ -13,11 +13,12 @@ const num = (v: unknown) => (v === null || v === undefined || v === '' ? null : 
 
 type Row = Record<string, any>;
 
-function availability(note: string | null): string {
-  if (!note) return "Menejer aniqlaydi";
-  if (/mavjud/i.test(note)) return "Omborda mavjud (yakuniy qoldiqni menejer tasdiqlaydi)";
-  if (/kam/i.test(note)) return "Kam qoldi (qoldiqni menejer tasdiqlaydi)";
-  return "Qoldiqni menejer aniqlaydi";
+// The model gets neutral codes/English notes (not Uzbek sentences) so it phrases everything in the customer's own language
+// instead of mixing languages; the system prompt explains each code.
+function availability(note: string | null): 'in_stock' | 'low_stock' | 'check_with_manager' {
+  if (note && /mavjud/i.test(note)) return 'in_stock';
+  if (note && /kam/i.test(note)) return 'low_stock';
+  return 'check_with_manager';
 }
 
 function compact(r: Row) {
@@ -28,7 +29,7 @@ function compact(r: Row) {
     name_ru: r.name_ru || undefined,
     category: r.category,
     price_per_pack: r.price_on_request ? null : num(r.price),
-    price_note: r.price_on_request ? "Narxi menejer tomonidan aniqlanadi" : undefined,
+    price_on_request: r.price_on_request ? true : undefined,
     pack_unit: r.pack_unit || 'qadoq',
     pieces_per_pack: num(r.pack_qty),
     approx_price_per_piece: r.price_on_request ? null : num(r.unit_price),
@@ -46,7 +47,7 @@ function detailed(r: Row) {
     packs_per_box: num(r.packs_per_box),
     pieces_per_box: num(r.box_qty),
     volume_prices: tiers.length ? tiers : undefined,
-    volume_prices_note: tiers.length ? "Faqat shu oraliqlar uchun; boshqa hajmlar uchun narxni menejer aniqlaydi" : undefined,
+    volume_prices_note: tiers.length ? "Only for these quantity ranges; for other quantities the manager sets the price" : undefined,
     product_page: r.url || undefined,
   };
 }
@@ -101,7 +102,7 @@ export async function searchProducts(db: Sql, query: string) {
                  || ' ' || coalesce(description, '') || ' ' || coalesce(description_ru, '')) ILIKE p) AS score
       FROM products WHERE active
     ) t WHERE score > 0 ORDER BY score DESC, id LIMIT 8`;
-  if (rows.length === 0) return { success: true, products: [], message: "Bu so'rov bo'yicha katalogdan mahsulot topilmadi" };
+  if (rows.length === 0) return { success: true, products: [], message: "No product in the catalog matched this query" };
   return { success: true, products: rows.map(compact) };
 }
 
@@ -109,7 +110,7 @@ export async function getProduct(db: Sql, id: number) {
   const r = await db`SELECT id, sku, name, name_ru, description, description_ru, category, category_ru, price, price_on_request,
       pack_unit, pack_qty, pack_qty_unit, packs_per_box, box_qty, unit_price, min_order, price_tiers, stock_note, url, image_url
     FROM products WHERE id = ${id} AND active`;
-  if (r.length === 0) return { error: "Mahsulot topilmadi" };
+  if (r.length === 0) return { error: "Product not found" };
   return { success: true, product: detailed(r[0]) };
 }
 
@@ -120,7 +121,7 @@ export type QuoteInput = { product_id: number; packs: number };
 type Tier = { from: number; to: number | null; unit?: string; price: number };
 
 export async function calculateQuote(db: Sql, items: QuoteInput[]) {
-  if (!Array.isArray(items) || items.length === 0 || items.length > 30) return { error: "Mahsulotlar ro'yxati noto'g'ri" };
+  if (!Array.isArray(items) || items.length === 0 || items.length > 30) return { error: "Invalid product list" };
   const lines: any[] = [];
   let total = 0;
   const unpriced: string[] = [];
@@ -129,17 +130,17 @@ export async function calculateQuote(db: Sql, items: QuoteInput[]) {
   for (const item of items) {
     const packs = Number(item?.packs);
     const id = Number(item?.product_id);
-    if (!Number.isInteger(id) || !Number.isInteger(packs) || packs < 1 || packs > 100000) return { error: "Mahsulot yoki qadoq soni noto'g'ri" };
+    if (!Number.isInteger(id) || !Number.isInteger(packs) || packs < 1 || packs > 100000) return { error: "Invalid product id or number of packs" };
     const rows = await db`SELECT id, sku, name, price, price_on_request, pack_unit, pack_qty, pack_qty_unit, min_order, price_tiers
                           FROM products WHERE id = ${id} AND active`;
     const p = rows[0];
-    if (!p) return { error: `Mahsulot topilmadi (ID: ${id})` };
+    if (!p) return { error: `Product not found (id ${id})` };
 
     const unit = p.pack_unit || 'qadoq';
     const pieces = p.pack_qty ? Number(p.pack_qty) * packs : null;
     if (p.price_on_request || !(Number(p.price) > 0)) {
       unpriced.push(p.name);
-      lines.push({ product_id: p.id, sku: p.sku, name: p.name, packs, unit, pieces, price_per_pack: null, line_total: null, note: "Narxi menejer tomonidan aniqlanadi" });
+      lines.push({ product_id: p.id, sku: p.sku, name: p.name, packs, unit, pieces, price_per_pack: null, line_total: null, note: "Price on request: the manager sets it" });
       continue;
     }
 
@@ -150,18 +151,18 @@ export async function calculateQuote(db: Sql, items: QuoteInput[]) {
       if (packs >= t.from && (t.to === null || packs <= t.to)) { tierApplied = t; price = Number(t.price); }
     }
     const lineNotes: string[] = [];
-    if (tierApplied) lineNotes.push(`${tierApplied.from}${tierApplied.to ? '–' + tierApplied.to : '+'} ${unit} uchun ulgurji narx qo'llandi`);
+    if (tierApplied) lineNotes.push(`Volume price applied for ${tierApplied.from}${tierApplied.to ? '–' + tierApplied.to : '+'} ${unit}`);
     const maxTier = tiers.reduce((m, t) => Math.max(m, t.to ?? t.from), 0);
-    if (tiers.length && packs > maxTier) lineNotes.push("Bu hajm uchun ulgurji narxni menejer aniqlaydi");
-    if (p.min_order && packs < Number(p.min_order)) lineNotes.push(`Minimal buyurtma: ${p.min_order} ${unit}`);
+    if (tiers.length && packs > maxTier) lineNotes.push("Beyond the listed volume tiers: the manager sets the price for this quantity");
+    if (p.min_order && packs < Number(p.min_order)) lineNotes.push(`Minimum order is ${p.min_order} ${unit}`);
 
     const lineTotal = price * packs;
     total += lineTotal;
     lines.push({ product_id: p.id, sku: p.sku, name: p.name, packs, unit, pieces, price_per_pack: price, line_total: lineTotal, note: lineNotes.join('; ') || undefined });
   }
 
-  if (unpriced.length) notes.push(`Narxi aniqlanmagan: ${unpriced.join(', ')} — jami summaga kiritilmagan`);
-  notes.push("Bu taxminiy hisob. Yakuniy narx va ombor qoldig'ini menejer tasdiqlaydi.");
+  if (unpriced.length) notes.push(`Price on request, NOT included in the total: ${unpriced.join(', ')}`);
+  notes.push("This is an estimate: the manager confirms stock and the final price.");
   return { success: true, lines, total_estimate: total, currency: "so'm", priced_all: unpriced.length === 0, notes };
 }
 
@@ -186,9 +187,9 @@ export async function createRequest(db: Sql, input: RequestInput, ctx: RequestCo
   const name = String(input?.customer_name ?? '').trim();
   const phone = String(input?.customer_phone ?? '').trim();
   const region = String(input?.region ?? '').trim();
-  if (!name || name.length > 100) return { error: "Mijozning ismi kerak" };
-  if (phone.replace(/\D/g, '').length < 9 || phone.length > 20) return { error: "Telefon raqami noto'g'ri" };
-  if (!region || region.length > 200) return { error: "Shahar yoki viloyat kerak" };
+  if (!name || name.length > 100) return { error: "The customer's name is required" };
+  if (phone.replace(/\D/g, '').length < 9 || phone.length > 20) return { error: "The phone number is invalid" };
+  if (!region || region.length > 200) return { error: "The city or region is required" };
 
   const quote: any = await calculateQuote(db, input.items);
   if (quote.error) return quote;
@@ -205,7 +206,7 @@ export async function createRequest(db: Sql, input: RequestInput, ctx: RequestCo
   const recent = await db`SELECT COUNT(*) FILTER (WHERE customer_phone = ${phone})::int AS by_phone, COUNT(*)::int AS total
                           FROM orders WHERE created_at > now() - interval '1 hour'`;
   if (recent[0].by_phone >= HOURLY_LIMIT_PER_PHONE || recent[0].total >= HOURLY_LIMIT_TOTAL) {
-    return { error: "Hozir juda ko'p so'rov yuborildi. Iltimos, menejerga telefon orqali murojaat qiling." };
+    return { error: "Too many requests right now. Ask the customer to phone the manager instead." };
   }
 
   const inserted = await db`
@@ -248,8 +249,8 @@ function hoursInfo() {
   return {
     working_hours_now: now.open,
     manager_reply: now.open
-      ? "Menejer odatda 10–15 daqiqa ichida bog'lanadi"
-      : "Hozir ish vaqti emas (dushanba–shanba 09:00–20:00), menejer keyingi ish kunida bog'lanadi",
+      ? "A manager usually contacts the customer within 10–15 minutes"
+      : "It is outside working hours (Mon–Sat 09:00–20:00): a manager will contact the customer on the next working day",
   };
 }
 
