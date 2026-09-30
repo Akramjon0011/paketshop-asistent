@@ -1,10 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
-import { Send, User, Package, Loader2, Sparkles, Volume2, VolumeX, Mic, Square, Store } from 'lucide-react';
+import { Send, User, Package, Loader2, Sparkles, Volume2, VolumeX, Mic, Square } from 'lucide-react';
 import { generateSpeech } from '../services/geminiService';
 import { formatPrice } from '../lib/format';
-import ProductImage from '../components/shop/ProductImage';
+import ProductImage from '../components/ProductImage';
 
 type Message = {
   id: string;
@@ -516,10 +516,6 @@ export default function Chat() {
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
-          <Link to="/" className="bg-white/20 hover:bg-white/30 p-2 rounded-full transition-colors flex items-center justify-center" title="Do'kon" aria-label="Do'konga qaytish">
-             <Store className="w-5 h-5" />
-          </Link>
           <button 
              onClick={() => {
                  setIsAudioEnabled(!isAudioEnabled);
@@ -530,7 +526,6 @@ export default function Chat() {
           >
              {isAudioEnabled ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5 opacity-70" />}
           </button>
-          </div>
         </div>
       </header>
 
