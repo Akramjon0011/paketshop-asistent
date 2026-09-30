@@ -20,16 +20,29 @@ function isTransientGeminiError(err: any): boolean {
   return /UNAVAILABLE|high demand|overloaded|RESOURCE_EXHAUSTED|fetch failed|ETIMEDOUT|ECONNRESET/i.test(String(err?.message || err));
 }
 
-// A daily quota ("10 requests per day on Free Tier") won't clear in a second: don't retry the same model
-const isDailyQuotaError = (err: any) => /per day|PerDay|daily/i.test(String(err?.message || err));
+// A quota error (429) won't clear within a second: don't retry the same model, and skip it for a while
+// (per server instance) so the next requests go straight to the fallback instead of failing first.
+const isQuotaError = (err: any) =>
+  Number(err?.status ?? err?.code) === 429 || /RESOURCE_EXHAUSTED|exceeded your current quota|Rate limit exceeded/i.test(String(err?.message || err));
+const modelCooldown = new Map<string, number>(); // model -> epoch ms until which it is skipped
+function coolDown(model: string, err: unknown) {
+  const hint = String((err as any)?.message || err).match(/retry in ([\d.]+)s/i);
+  const seconds = Math.min(120, hint ? Math.ceil(Number(hint[1])) : 30);
+  modelCooldown.set(model, Date.now() + seconds * 1000);
+}
+function availableModels(models: (string | undefined)[]): string[] {
+  const all = models.filter((m, i, arr): m is string => !!m && arr.indexOf(m) === i);
+  const ready = all.filter(m => (modelCooldown.get(m) ?? 0) < Date.now());
+  return ready.length ? ready : all;
+}
 
 // Remember Gemini problems (quota, timeouts) where /api/telegram-status can show them
 const noteGeminiProblem = (kind: string, model: string, err: unknown) =>
-  recordEvent(kind, `${model}: ${String((err as any)?.message || err).replace(/\s+/g, ' ').slice(0, 200)}`, 'gemini_events');
+  recordEvent(kind, `${model}: ${String((err as any)?.message || err).replace(/\s+/g, ' ').slice(0, 480)}`, 'gemini_events');
 
 // generateContent with one quick retry on the primary model, then one attempt (plus retry) on the fallback model
 export async function generateContentResilient(params: Parameters<typeof ai.models.generateContent>[0]) {
-  const models = [params.model, CHAT_FALLBACK_MODEL].filter((m, i, arr) => m && arr.indexOf(m) === i);
+  const models = availableModels([params.model, CHAT_FALLBACK_MODEL]);
   let lastErr: any;
   for (const model of models) {
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -52,7 +65,7 @@ export async function generateContentResilient(params: Parameters<typeof ai.mode
         if (!isTransientGeminiError(err)) throw err;
         console.warn(`Gemini ${model} transient error (attempt ${attempt + 1}):`, (err as any)?.status ?? '', String((err as any)?.message || err).slice(0, 120));
         await noteGeminiProblem('gemini_error', model, err);
-        if (isDailyQuotaError(err)) break;
+        if (isQuotaError(err)) { coolDown(model, err); break; }
         if (attempt === 0) await new Promise(r => setTimeout(r, 700));
       } finally {
         clearTimeout(timer);
@@ -64,7 +77,7 @@ export async function generateContentResilient(params: Parameters<typeof ai.mode
 
 // generateContentStream with retry on primary, fallback to fallback model
 export async function generateContentStreamResilient(params: Parameters<typeof ai.models.generateContentStream>[0]) {
-  const models = [params.model, CHAT_FALLBACK_MODEL].filter((m, i, arr) => m && arr.indexOf(m) === i);
+  const models = availableModels([params.model, CHAT_FALLBACK_MODEL]);
   let lastErr: any;
   for (const model of models) {
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -87,7 +100,7 @@ export async function generateContentStreamResilient(params: Parameters<typeof a
         if (!isTransientGeminiError(err)) throw err;
         console.warn(`Gemini stream ${model} transient error (attempt ${attempt + 1}):`, (err as any)?.status ?? '', String((err as any)?.message || err).slice(0, 120));
         await noteGeminiProblem('gemini_error', model, err);
-        if (isDailyQuotaError(err)) break;
+        if (isQuotaError(err)) { coolDown(model, err); break; }
         if (attempt === 0) await new Promise(r => setTimeout(r, 700));
       } finally {
         clearTimeout(timer);
