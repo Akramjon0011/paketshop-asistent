@@ -279,6 +279,11 @@ function pageEntries(lines: string[], page: string, url: string, lang: 'uz' | 'r
   }
   while (cur.length && isHeading(cur[cur.length - 1])) cur.pop();
   if (cur.length) chunks.push(render(cur));
+  // A short tail ("Have a question? Call ...") is not worth its own entry: it would outrank the real content for generic questions
+  while (chunks.length > 1 && chunks[chunks.length - 1].length < 250) {
+    const tail = chunks.pop()!;
+    chunks[chunks.length - 1] += `\n${tail}`;
+  }
 
   return chunks
     .filter(c => c.length >= 60)
