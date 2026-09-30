@@ -1,8 +1,8 @@
 import express from 'express';
 import multer from 'multer';
 import { v2 as cloudinary } from 'cloudinary';
-import { sql } from './db.js';
-import { generateEmbedding, searchKnowledgeBase, handleConversationalChat, handleConversationalChatStream, transcribeAudio, generateSpeech, dbCreateOrder, BRAND, BRAND_GREETING, appendHistory } from './ai.js';
+import { sql, initDb } from './db.js';
+import { generateEmbedding, searchKnowledgeBase, handleConversationalChat, handleConversationalChatStream, transcribeAudio, generateSpeech, BRAND, BRAND_GREETING, appendHistory } from './ai.js';
 import { GoogleGenAI } from "@google/genai";
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -41,43 +41,14 @@ router.get("/health", (req, res) => {
   res.json({ status: "ok", commit: process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7), webAppUrl: process.env.APP_URL });
 });
 
-// Public: featured products for the chat carousel — latest 6 + top-sold 6
-router.get("/products/featured", async (_req, res) => {
-  if (!sql) return res.status(500).json({ error: "Database not connected" });
-  try {
-    const [latest, popular] = await Promise.all([
-      sql`
-        SELECT id, name, description, price, category, image_url
-        FROM products WHERE stock > 0
-        ORDER BY created_at DESC LIMIT 6
-      `,
-      sql`
-        SELECT p.id, p.name, p.description, p.price, p.category, p.image_url,
-               COALESCE(SUM((item->>'quantity')::integer), 0)::integer AS units_sold
-        FROM products p
-        LEFT JOIN orders o ON o.status != 'cancelled'
-        LEFT JOIN jsonb_array_elements(o.items) AS item
-          ON (item->>'product_id')::integer = p.id
-        WHERE p.stock > 0
-        GROUP BY p.id
-        ORDER BY units_sold DESC, p.created_at DESC
-        LIMIT 6
-      `,
-    ]);
-    res.json({ latest, popular });
-  } catch (err) {
-    console.error("Featured products error:", err);
-    res.status(500).json({ error: String(err) });
-  }
-});
-
 // Public: GET single product details by id
 router.get("/products/:id", async (req, res) => {
   if (!sql) return res.status(500).json({ error: "Database not connected" });
   try {
+    await initDb(); // the `active` / `url` columns come from the schema update
     const data = await sql`
-      SELECT id, name, description, price, category, stock, image_url 
-      FROM products WHERE id = ${req.params.id}
+      SELECT id, name, name_ru, category, price, price_on_request, pack_unit, pack_qty, unit_price, url, image_url
+      FROM products WHERE id = ${req.params.id} AND active
     `;
     if (data.length === 0) return res.status(404).json({ error: "Mahsulot topilmadi" });
     res.json(data[0]);
@@ -120,11 +91,6 @@ const aiLimiter = rateLimit({
   message: { error: "Juda tez yozyapsiz. Bir daqiqadan so'ng qayta urinib ko'ring." }
 });
 
-const orderLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  max: 10,
-  message: { error: "Juda ko'p buyurtma yuborildi. Keyinroq urinib ko'ring." }
-});
 
 const JWT_SECRET = process.env.JWT_SECRET || process.env.ADMIN_PASSWORD;
 if (!process.env.JWT_SECRET) {
@@ -159,7 +125,7 @@ router.post("/admin/login", loginLimiter, (req, res) => {
 router.get("/knowledge", requireAdmin, async (req, res) => {
   if (!sql) return res.status(500).json({ error: "Database not connected" });
   try {
-    const data = await sql`SELECT * FROM knowledge_base ORDER BY created_at DESC`;
+    const data = await sql`SELECT id, question, answer, image_url, video_url, created_at, source FROM knowledge_base ORDER BY created_at DESC`; // no embedding vectors: ~15 KB each
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -387,65 +353,6 @@ router.post("/knowledge/reindex", requireAdmin, async (req, res) => {
     res.json({ success: true, total: data.length, updated });
   } catch (err) {
     console.error("Reindex error:", err);
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-// Public: GET customer details by webSessionId (for checkout form pre-fill)
-router.get("/customers/session/:webSessionId", async (req, res) => {
-  if (!sql) return res.status(500).json({ error: "Database not connected" });
-  try {
-    const data = await sql`
-      SELECT name, phone, address FROM customers 
-      WHERE web_session_id = ${req.params.webSessionId}
-      LIMIT 1
-    `;
-    if (data.length === 0) return res.json(null);
-    res.json(data[0]);
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-// Public: POST create order directly from checkout form
-router.post("/orders", orderLimiter, async (req, res) => {
-  if (!sql) return res.status(500).json({ error: "Database not connected" });
-  const { customer_name, customer_phone, delivery_address, items, webSessionId } = req.body;
-  if (!customer_name || !customer_phone || !delivery_address || !items || !Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ error: "Barcha maydonlar to'ldirilishi shart va mahsulotlar ro'yxati kamida bitta elementdan iborat bo'lishi kerak" });
-  }
-  const validItems = items.every((i: any) =>
-    Number.isInteger(Number(i?.product_id)) && Number.isInteger(Number(i?.quantity)) &&
-    Number(i.quantity) >= 1 && Number(i.quantity) <= 100
-  );
-  if (!validItems) return res.status(400).json({ error: "Mahsulot yoki miqdor noto'g'ri" });
-  if (String(customer_phone).replace(/\D/g, '').length < 9 || String(customer_phone).length > 20) {
-    return res.status(400).json({ error: "Telefon raqami noto'g'ri" });
-  }
-  if (String(customer_name).length > 100 || String(delivery_address).length > 300) {
-    return res.status(400).json({ error: "Ism yoki manzil juda uzun" });
-  }
-  try {
-    const result = await dbCreateOrder(
-      customer_name,
-      customer_phone,
-      delivery_address,
-      items,
-      undefined,
-      webSessionId
-    );
-    
-    if (result.success && webSessionId) {
-      const itemsList = items.map((i: any) => `${i.quantity} dona "${i.name || 'mahsulot'}"`).join(', ');
-      const userMsg = `Menga ${itemsList} mahsulotidan buyurtma bering. (Ism: ${customer_name}, Tel: ${customer_phone}, Manzil: ${delivery_address})`;
-      const modelMsg = `Rahmat! Buyurtmangiz qabul qilindi. Buyurtma raqami: #${result.order_id}. Jami: ${Number(result.total_price).toLocaleString()} so'm. Tez orada kuryerimiz siz bilan bog'lanadi.`;
-      await appendHistory({ webSessionId }, 'user', userMsg);
-      await appendHistory({ webSessionId }, 'model', modelMsg);
-    }
-    
-    res.json(result);
-  } catch (err) {
-    console.error("Direct order creation error:", err);
     res.status(500).json({ error: String(err) });
   }
 });

@@ -1,45 +1,67 @@
-// Sends new-order notifications to the shop owner(s) on Telegram.
-// Set ADMIN_TELEGRAM_ID (comma-separated for several people) — the owner can get the number by sending /id to the bot.
+// Sends new-request notifications to the managers on Telegram.
+// Set ADMIN_TELEGRAM_ID (comma-separated for several people) — a manager can get the number by sending /id to the bot.
 
-export type OrderNotice = {
-  orderId: number | string;
+export type RequestLine = {
+  sku?: string | null;
+  name: string;
+  packs: number;
+  unit: string;
+  pieces?: number | null;
+  price_per_pack: number | null;
+  line_total: number | null;
+};
+
+export type RequestNotice = {
+  requestId: number | string;
   customerName: string;
   customerPhone: string;
-  deliveryAddress: string;
-  items: Array<{ name: string; quantity: number; price: number }>;
-  total: number | string;
+  region: string;
+  company?: string;
+  notes?: string;
+  lines: RequestLine[];
+  total: number;
+  pricedAll: boolean;
   source: string;
 };
 
 const formatPrice = (n: number | string) => Number(n).toLocaleString('en-US').replace(/,/g, ' ');
 
-export function buildOrderMessage(o: OrderNotice): string {
+export function adminChatIds(): string[] {
+  return (process.env.ADMIN_TELEGRAM_ID || '').split(',').map(s => s.trim()).filter(Boolean);
+}
+
+export function buildRequestMessage(o: RequestNotice): string {
   const currency = process.env.CURRENCY || "so'm";
-  const lines = o.items.map(i => `• ${i.name} × ${i.quantity} = ${formatPrice(i.price * i.quantity)} ${currency}`);
+  const lines = o.lines.map(l => {
+    const qty = `${l.packs} ${l.unit}${l.pieces ? ` (${formatPrice(l.pieces)} dona)` : ''}`;
+    const sum = l.line_total !== null ? ` = ${formatPrice(l.line_total)} ${currency}` : ' — narxi aniqlanadi';
+    return `• ${l.name}${l.sku ? ` [${l.sku}]` : ''} — ${qty}${sum}`;
+  });
   return [
-    `🛒 Yangi buyurtma #${o.orderId}`,
+    `📥 Yangi so'rov #${o.requestId}`,
     '',
-    `👤 ${o.customerName}`,
+    `👤 ${o.customerName}${o.company ? ` (${o.company})` : ''}`,
     `📞 ${o.customerPhone}`,
-    `📍 ${o.deliveryAddress}`,
+    `📍 ${o.region}`,
     '',
     ...lines,
     '',
-    `💰 Jami: ${formatPrice(o.total)} ${currency}`,
-    `📲 Manba: ${o.source}`
+    `💰 Taxminiy jami: ${formatPrice(o.total)} ${currency}${o.pricedAll ? '' : ' (narxsiz mahsulotlarsiz)'}`,
+    ...(o.notes ? [`📝 ${o.notes}`] : []),
+    `📲 Manba: ${o.source}`,
+    '',
+    "Qoldiq va yakuniy narxni tasdiqlab, mijozga bog'laning.",
   ].join('\n').slice(0, 4000);
 }
 
-// Never throws: a failed notification must not break order creation.
-export async function notifyNewOrder(order: OrderNotice): Promise<void> {
+export async function sendToAdmins(text: string, withAdminButton = true): Promise<void> {
   try {
     const token = process.env.TELEGRAM_BOT_TOKEN;
-    const chatIds = (process.env.ADMIN_TELEGRAM_ID || '').split(',').map(s => s.trim()).filter(Boolean);
+    const chatIds = adminChatIds();
     if (!token || chatIds.length === 0) return;
 
-    const text = buildOrderMessage(order);
     const appUrl = process.env.APP_URL;
-    const reply_markup = appUrl?.startsWith('https://')
+    const reply_markup = withAdminButton && appUrl?.startsWith('https://')
       ? { inline_keyboard: [[{ text: '📋 Admin panel', url: new URL('admin', appUrl).toString() }]] }
       : undefined;
 
@@ -52,12 +74,17 @@ export async function notifyNewOrder(order: OrderNotice): Promise<void> {
           signal: AbortSignal.timeout(4000),
           body: JSON.stringify({ chat_id, text, reply_markup })
         });
-        if (!res.ok) console.warn(`Order notification to ${chat_id} failed: ${res.status} ${(await res.text()).slice(0, 150)}`);
+        if (!res.ok) console.warn(`Notification to ${chat_id} failed: ${res.status} ${(await res.text()).slice(0, 150)}`);
       } catch (err) {
-        console.warn(`Order notification to ${chat_id} failed:`, String((err as any)?.message || err));
+        console.warn(`Notification to ${chat_id} failed:`, String((err as any)?.message || err));
       }
     }));
   } catch (err) {
-    console.warn('Order notification error:', String((err as any)?.message || err));
+    console.warn('Notification error:', String((err as any)?.message || err));
   }
+}
+
+// Never throws: a failed notification must not break request creation.
+export async function notifyNewRequest(request: RequestNotice): Promise<void> {
+  await sendToAdmins(buildRequestMessage(request));
 }

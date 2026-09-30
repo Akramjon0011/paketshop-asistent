@@ -32,14 +32,14 @@ type BrandConfig = {
   currency: string;
 };
 
-type FeaturedProduct = {
-  id: number;
-  name: string;
-  description: string | null;
-  price: string | number;
-  category: string | null;
-  image_url: string | null;
-};
+// Quick-start questions shown before the first message
+const SUGGESTIONS = [
+  "Kafe uchun stakan va qopqoq kerak",
+  "Kraft paketlar qanday o'lchamlarda?",
+  "Ulgurji narxlar qanday ishlaydi?",
+  "Yetkazib berish shartlari",
+  "Menejer bilan bog'lanish",
+];
 
 const DEFAULT_BRAND: BrandConfig = {
   shopName: "Paketshop.uz",
@@ -61,14 +61,6 @@ export default function Chat() {
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
   const [webSessionId, setWebSessionId] = useState('');
   const [isRecording, setIsRecording] = useState(false);
-  const [featured, setFeatured] = useState<{ latest: FeaturedProduct[]; popular: FeaturedProduct[] }>({ latest: [], popular: [] });
-  const [carouselMode, setCarouselMode] = useState<'popular' | 'latest'>('popular');
-  const [checkoutProduct, setCheckoutProduct] = useState<FeaturedProduct | null>(null);
-  const [quantity, setQuantity] = useState(1);
-  const [customerName, setCustomerName] = useState('');
-  const [customerPhone, setCustomerPhone] = useState('');
-  const [deliveryAddress, setDeliveryAddress] = useState('');
-  const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
 
   useEffect(() => {
     fetch('/api/config')
@@ -81,17 +73,8 @@ export default function Chat() {
           : prev);
       })
       .catch(() => { /* keep defaults */ });
-
-    fetch('/api/products/featured')
-      .then(r => r.ok ? r.json() : null)
-      .then(data => { if (data) setFeatured(data); })
-      .catch(() => { /* ignore */ });
   }, []);
 
-  const handleProductClick = (p: FeaturedProduct) => {
-    setInput(`Mana shu mahsulot haqida ko'proq ma'lumot bering: "${p.name}" (ID: ${p.id})`);
-  };
-  
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -105,21 +88,6 @@ export default function Chat() {
     }
     setWebSessionId(id);
   }, []);
-
-  useEffect(() => {
-    if (checkoutProduct && webSessionId) {
-      fetch(`/api/customers/session/${webSessionId}`)
-        .then(r => r.ok ? r.json() : null)
-        .then(data => {
-          if (data) {
-            if (data.name) setCustomerName(data.name);
-            if (data.phone) setCustomerPhone(data.phone);
-            if (data.address) setDeliveryAddress(data.address);
-          }
-        })
-        .catch(() => {});
-    }
-  }, [checkoutProduct, webSessionId]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -283,80 +251,6 @@ export default function Chat() {
     await sendMessageText(textToSend);
   };
 
-  const autoOrderProduct = (p: FeaturedProduct) => {
-    sendMessageText(`Menga 1 dona "${p.name}" (ID: ${p.id}) mahsulotidan buyurtma bering.`);
-  };
-
-  const handleOrderSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!checkoutProduct || isSubmittingOrder) return;
-    
-    if (!customerName.trim() || !customerPhone.trim() || !deliveryAddress.trim()) {
-      setError("Iltimos, barcha maydonlarni to'ldiring.");
-      return;
-    }
-    
-    setIsSubmittingOrder(true);
-    setError(null);
-    
-    try {
-      const res = await fetch('/api/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          customer_name: customerName.trim(),
-          customer_phone: customerPhone.trim(),
-          delivery_address: deliveryAddress.trim(),
-          items: [{ 
-            product_id: checkoutProduct.id, 
-            name: checkoutProduct.name,
-            price: Number(checkoutProduct.price),
-            quantity: quantity 
-          }],
-          webSessionId: webSessionId
-        })
-      });
-      
-      const data = await res.json();
-      if (!res.ok || data.error) {
-        throw new Error(data.error || "Buyurtma berishda xatolik yuz berdi.");
-      }
-      
-      // Close modal
-      const orderedProduct = checkoutProduct;
-      const orderQuantity = quantity;
-      setCheckoutProduct(null);
-      
-      // Add user message mock
-      const userMsgId = Date.now().toString();
-      const userMsgText = `Menga ${orderQuantity} dona "${orderedProduct.name}" mahsulotidan buyurtma bering. (Ism: ${customerName.trim()}, Tel: ${customerPhone.trim()}, Manzil: ${deliveryAddress.trim()})`;
-      const userMessage: Message = { id: userMsgId, role: 'user', content: userMsgText };
-      
-      // Add model message mock
-      const modelMsgId = (Date.now() + 1).toString();
-      const modelMsgText = `Rahmat! Buyurtmangiz qabul qilindi. Buyurtma raqami: #${data.order_id}. Jami: ${formatPrice(data.total_price)} so'm. Tez orada kuryerimiz siz bilan bog'lanadi.`;
-      const modelMessage: Message = { id: modelMsgId, role: 'model', content: modelMsgText };
-      
-      setMessages(prev => [...prev, userMessage, modelMessage]);
-      
-      // Play audio if enabled
-      if (isAudioEnabled && modelMsgText) {
-        try {
-          const audioData = await generateSpeech(modelMsgText);
-          if (audioData) playPCMBase64(audioData, modelMsgId);
-        } catch (audioErr) {
-          console.error("TTS generation failed after order submission:", audioErr);
-        }
-      }
-      
-    } catch (err: any) {
-      console.error(err);
-      setError(err.message || "Buyurtmani rasmiylashtirishda xatolik yuz berdi.");
-    } finally {
-      setIsSubmittingOrder(false);
-    }
-  };
-
   const startRecording = async () => {
     try {
       stopCurrentAudio();
@@ -464,22 +358,17 @@ export default function Chat() {
     return match ? parseInt(match[1], 10) : null;
   };
 
+  // The [BUYURTMA: id] tag now opens the product page on paketshop.uz (orders go through the assistant / manager)
   const handleInlineOrderClick = async (productId: number) => {
-    setIsLoading(true);
     setError(null);
     try {
       const res = await fetch(`/api/products/${productId}`);
-      if (!res.ok) {
-        throw new Error("Mahsulot ma'lumotlarini yuklab bo'lmadi.");
-      }
+      if (!res.ok) throw new Error("Mahsulot ma'lumotlarini yuklab bo'lmadi.");
       const product = await res.json();
-      setCheckoutProduct(product);
-      setQuantity(1);
+      if (product.url) window.open(product.url, '_blank', 'noopener');
     } catch (err: any) {
       console.error(err);
       setError(err.message || "Xatolik yuz berdi.");
-    } finally {
-      setIsLoading(false);
     }
   };
 
@@ -565,7 +454,7 @@ export default function Chat() {
                         className="bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white font-bold text-xs py-2 px-4 rounded-xl shadow transition-all flex items-center gap-1.5 cursor-pointer hover:scale-[1.02]"
                       >
                         <Package className="w-3.5 h-3.5" />
-                        Hozir buyurtma berish
+                        Mahsulot sahifasi
                       </button>
                     </div>
                   )}
@@ -598,64 +487,20 @@ export default function Chat() {
         </div>
       </main>
 
-      {/* Featured Products Carousel */}
-      {(featured.popular.length > 0 || featured.latest.length > 0) && (
+      {/* Suggested questions (only before the conversation starts) */}
+      {messages.length <= 1 && !isLoading && (
         <div className="bg-white border-t border-gray-100 px-4 pt-3 pb-2 shrink-0">
-          <div className="w-full max-w-4xl mx-auto">
-            <div className="flex items-center gap-3 mb-2">
+          <div className="w-full max-w-4xl mx-auto flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            {SUGGESTIONS.map(q => (
               <button
-                onClick={() => setCarouselMode('popular')}
-                className={`text-xs font-bold px-3 py-1 rounded-full transition-all ${
-                  carouselMode === 'popular' ? 'bg-amber-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                }`}
+                key={q}
+                type="button"
+                onClick={() => sendMessageText(q)}
+                className="shrink-0 text-sm font-medium px-4 py-2 rounded-full bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 transition-colors cursor-pointer"
               >
-                🔥 Mashhur
+                {q}
               </button>
-              <button
-                onClick={() => setCarouselMode('latest')}
-                className={`text-xs font-bold px-3 py-1 rounded-full transition-all ${
-                  carouselMode === 'latest' ? 'bg-amber-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                }`}
-              >
-                ✨ Yangi
-              </button>
-            </div>
-            <div className="flex gap-3 overflow-x-auto pb-2 -mx-1 px-1 snap-x">
-              {(carouselMode === 'popular' ? featured.popular : featured.latest).map((p) => (
-                <div
-                  key={p.id}
-                  className="snap-start shrink-0 w-32 sm:w-36 bg-white border border-gray-200 hover:border-amber-400 hover:shadow-md rounded-xl overflow-hidden transition-all text-left flex flex-col justify-between"
-                >
-                  <div 
-                    onClick={() => handleProductClick(p)}
-                    className="cursor-pointer"
-                  >
-                    {p.image_url ? (
-                      <ProductImage src={p.image_url} alt={p.name} className="w-full h-20" />
-                    ) : (
-                      <div className="w-full h-20 bg-gray-100 flex items-center justify-center">
-                        <Package className="w-6 h-6 text-gray-300" />
-                      </div>
-                    )}
-                    <div className="p-2 pb-1">
-                      <p className="text-xs font-bold text-gray-900 line-clamp-1">{p.name}</p>
-                      <p className="text-xs font-extrabold text-amber-600 mt-0.5">
-                        {formatPrice(p.price)} {brand.currency}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="p-2 pt-0">
-                    <button
-                      onClick={() => { setCheckoutProduct(p); setQuantity(1); }}
-                      disabled={isLoading}
-                      className="w-full bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white text-[10px] sm:text-xs font-bold py-1 px-2 rounded-lg transition-all text-center flex items-center justify-center gap-1 shadow-sm cursor-pointer"
-                    >
-                      🛒 Buyurtma
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
+            ))}
           </div>
         </div>
       )}
@@ -716,155 +561,6 @@ export default function Chat() {
           </div>
         </div>
       </footer>
-
-      {/* Checkout Modal */}
-      {checkoutProduct && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto border border-gray-100 flex flex-col animate-in zoom-in-95 duration-200">
-            {/* Modal Header */}
-            <div className="p-5 border-b border-gray-100 flex justify-between items-center bg-amber-50 rounded-t-2xl">
-              <div>
-                <h3 className="text-lg font-bold text-gray-900">Buyurtma berish</h3>
-                <p className="text-xs text-amber-700 font-medium">Tez va qulay rasmiylashtirish</p>
-              </div>
-              <button
-                onClick={() => setCheckoutProduct(null)}
-                className="text-gray-400 hover:text-gray-600 p-1.5 hover:bg-gray-100 rounded-full transition-colors cursor-pointer"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-
-            {/* Modal Body */}
-            <form onSubmit={handleOrderSubmit} className="p-6 space-y-5 flex-1">
-              {/* Product Info Card */}
-              <div className="flex items-center gap-4 bg-gray-50 p-4 rounded-xl border border-gray-150">
-                {checkoutProduct.image_url ? (
-                  <ProductImage src={checkoutProduct.image_url} alt={checkoutProduct.name} className="w-16 h-16 rounded-lg border border-gray-200" />
-                ) : (
-                  <div className="w-16 h-16 bg-gray-200 flex items-center justify-center rounded-lg border border-gray-200">
-                    <Package className="w-8 h-8 text-gray-400" />
-                  </div>
-                )}
-                <div className="flex-1 min-w-0">
-                  <h4 className="text-sm font-bold text-gray-950 truncate">{checkoutProduct.name}</h4>
-                  <p className="text-sm font-black text-amber-600 mt-0.5">
-                    {formatPrice(checkoutProduct.price)} {brand.currency}
-                  </p>
-                  {checkoutProduct.category && (
-                    <span className="inline-block bg-amber-100 text-amber-800 text-[10px] font-bold px-2 py-0.5 rounded-full mt-1">
-                      {checkoutProduct.category}
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {/* Quantity Selector */}
-              <div className="flex items-center justify-between bg-amber-50/50 p-3.5 rounded-xl border border-amber-100/50">
-                <span className="text-sm font-semibold text-gray-700">Mahsulot soni:</span>
-                <div className="flex items-center space-x-3.5">
-                  <button
-                    type="button"
-                    onClick={() => setQuantity(q => Math.max(1, q - 1))}
-                    disabled={quantity <= 1}
-                    className="w-8 h-8 rounded-full bg-white border border-gray-300 hover:border-amber-500 hover:text-amber-600 disabled:opacity-40 disabled:hover:border-gray-300 disabled:hover:text-gray-800 transition-colors flex items-center justify-center font-extrabold text-lg cursor-pointer"
-                  >
-                    -
-                  </button>
-                  <span className="text-base font-bold text-gray-950 min-w-4 text-center">{quantity}</span>
-                  <button
-                    type="button"
-                    onClick={() => setQuantity(q => q + 1)}
-                    className="w-8 h-8 rounded-full bg-white border border-gray-300 hover:border-amber-500 hover:text-amber-600 transition-colors flex items-center justify-center font-extrabold text-lg cursor-pointer"
-                  >
-                    +
-                  </button>
-                </div>
-              </div>
-
-              {/* Customer Form Fields */}
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
-                    Ism va Familiyangiz <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={customerName}
-                    onChange={(e) => setCustomerName(e.target.value)}
-                    placeholder="Ismingizni kiriting"
-                    className="w-full bg-gray-50 border border-gray-300 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500 transition-all text-sm text-gray-900"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
-                    Telefon raqamingiz <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="tel"
-                    required
-                    value={customerPhone}
-                    onChange={(e) => setCustomerPhone(e.target.value)}
-                    placeholder="+998901234567"
-                    className="w-full bg-gray-50 border border-gray-300 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500 transition-all text-sm text-gray-900"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
-                    Yetkazib berish manzili <span className="text-red-500">*</span>
-                  </label>
-                  <textarea
-                    required
-                    rows={2}
-                    value={deliveryAddress}
-                    onChange={(e) => setDeliveryAddress(e.target.value)}
-                    placeholder="Tashrif manzili (shahar, tuman, ko'cha, uy/kvartira)"
-                    className="w-full bg-gray-50 border border-gray-300 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500 transition-all text-sm text-gray-900 resize-none"
-                  />
-                </div>
-              </div>
-
-              {/* Order total */}
-              <div className="pt-2 flex justify-between items-center text-sm font-semibold border-t border-gray-100">
-                <span className="text-gray-600">Umumiy summa:</span>
-                <span className="text-lg font-black text-amber-600">
-                  {formatPrice(Number(checkoutProduct.price) * quantity)} {brand.currency}
-                </span>
-              </div>
-
-              {/* Action Buttons */}
-              <div className="pt-2 flex gap-3">
-                <button
-                  type="button"
-                  onClick={() => setCheckoutProduct(null)}
-                  className="flex-1 py-3 px-4 border border-gray-300 rounded-xl text-sm font-semibold text-gray-700 hover:bg-gray-50 active:bg-gray-100 transition-colors text-center cursor-pointer"
-                >
-                  Bekor qilish
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSubmittingOrder}
-                  className="flex-1 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white py-3 px-4 rounded-xl text-sm font-bold shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  {isSubmittingOrder ? (
-                    <>
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      Yuborilmoqda...
-                    </>
-                  ) : (
-                    'Buyurtmani tasdiqlash'
-                  )}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

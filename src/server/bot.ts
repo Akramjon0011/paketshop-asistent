@@ -1,6 +1,8 @@
 import { Telegraf, Markup } from "telegraf";
-import { handleConversationalChat, generateSpeech, transcribeAudio, BRAND } from './ai.js';
-import { sql } from './db.js';
+import { handleConversationalChat, generateSpeech, transcribeAudio, generateEmbeddingsBatch, BRAND } from './ai.js';
+import { sql, initDb } from './db.js';
+import { adminChatIds } from './notify.js';
+import { planCatalogSync, applyCatalogSync, type SyncPlan } from './catalog.js';
 import { Mp3Encoder } from '@breezystack/lamejs';
 import { createHash } from 'crypto';
 
@@ -62,6 +64,24 @@ function describeErr(err: any): string {
   return err?.response?.description ? `${err.response.error_code} ${err.response.description}` : String(err?.message || err);
 }
 
+// Short human-readable summary of what a catalog sync would do
+function describePlan(plan: SyncPlan): string {
+  const unpriced = plan.site.products.filter(p => p.price_on_request).length;
+  const lines = [
+    `📦 paketshop.uz: ${plan.site.products.length} ta mahsulot${unpriced ? ` (${unpriced} tasi narxsiz)` : ''}, ${plan.kbEntries.length} ta ma'lumot bo'limi o'qildi.`,
+    `Yangi: ${plan.newProducts.length} · O'zgargan: ${plan.changed.length} · O'zgarmagan: ${plan.unchanged}`,
+  ];
+  if (plan.changed.length) lines.push('', "O'zgarishlar:", ...plan.changed.slice(0, 10).map(c => `• ${c.sku}: ${c.changes.join(', ')}`));
+  if (plan.deactivate.length) {
+    lines.push('', `Yashiriladi (o'chirilmaydi, faqat yordamchiga ko'rinmaydi): ${plan.deactivate.length} ta`,
+      ...plan.deactivate.slice(0, 12).map(d => `• ${d.name}`));
+    if (plan.firstSync) lines.push("(Birinchi sinxronlash: bazadagi eski namuna mahsulotlar shunday yashiriladi.)");
+  }
+  if (plan.site.errors.length) lines.push('', `Saytni o'qishda xatolar: ${plan.site.errors.length}`, ...plan.site.errors.slice(0, 3));
+  if (plan.problems.length) lines.push('', '⚠️ ' + plan.problems.join('; '));
+  return lines.join('\n').slice(0, 3800);
+}
+
 // Keeps the last few bot events in the DB so /api/telegram-status can show what happened (serverless logs are hard to reach)
 async function recordBotEvent(kind: string, detail?: string) {
   if (!sql) return;
@@ -95,7 +115,7 @@ export function setupBot(app: any) {
       bot.telegram.setChatMenuButton({
         menuButton: {
           type: 'web_app',
-          text: "🛍️ Do'kon",
+          text: "💬 Yordamchi",
           web_app: { url: webAppUrl }
         }
       }).then(() => {
@@ -113,6 +133,33 @@ export function setupBot(app: any) {
   // Lets the shop owner find the ID to put in ADMIN_TELEGRAM_ID (new-order notifications)
   bot.command('id', async (ctx) => {
     await ctx.reply(`Sizning Telegram ID: ${ctx.from.id}\n\nYangi buyurtma xabarlarini olish uchun shu raqamni ADMIN_TELEGRAM_ID muhit o'zgaruvchisiga yozing.`);
+  });
+
+  // Managers only: "/sync" previews what would change, "/sync apply" refreshes products and knowledge from paketshop.uz
+  bot.command('sync', async (ctx) => {
+    if (!adminChatIds().includes(String(ctx.from.id))) return; // stay silent for everyone else
+    const apply = /apply/i.test((ctx.message as any)?.text ?? '');
+    try {
+      if (!sql) { await ctx.reply("Ma'lumotlar bazasi ulanmagan."); return; }
+      await initDb();
+      await ctx.reply(apply ? "Sinxronlash boshlandi (taxminan 30–60 soniya)..." : "paketshop.uz o'qilyapti, hech narsa o'zgartirilmaydi...");
+      const plan = await planCatalogSync(sql);
+      if (!apply) {
+        await ctx.reply(`${describePlan(plan)}
+
+${plan.problems.length ? '' : "Qo'llash uchun: /sync apply"}`.trim());
+        return;
+      }
+      const res = await applyCatalogSync(sql, plan, generateEmbeddingsBatch);
+      await recordBotEvent('catalog_synced', JSON.stringify(res));
+      await ctx.reply(`✅ Tayyor.
+Mahsulotlar: ${res.products} (yangi ${res.added}, o'zgargan ${res.changed}, yashirilgan ${res.deactivated})
+Bilimlar bazasi: ${res.knowledge} bo'lim (${res.embedded} tasi qidiruvga tayyor)`);
+    } catch (err: any) {
+      console.error("Catalog sync failed:", describeErr(err));
+      await recordBotEvent('catalog_sync_failed', describeErr(err));
+      await ctx.reply(`Sinxronlashda xatolik: ${describeErr(err).slice(0, 300)}`);
+    }
   });
 
   bot.command('reset', async (ctx) => {
@@ -134,15 +181,15 @@ export function setupBot(app: any) {
 
   bot.command('webapp', async (ctx) => {
     const webAppUrl = process.env.APP_URL || "http://localhost:3000";
-    await ctx.reply("Bizning do'konimizni ochish uchun quyidagi tugmani bosing:", 
+    await ctx.reply("Yordamchini ochish uchun quyidagi tugmani bosing:", 
       Markup.inlineKeyboard([
-        [getWebAppButton("🛍️ Do'konga kirish", webAppUrl)]
+        [getWebAppButton("💬 Yordamchini ochish", webAppUrl)]
       ])
     );
   });
 
   bot.start(async (ctx) => {
-    const welcomeText = `Salom! Men ${BRAND.assistantName}, ${BRAND.shopName}'dan. Qanday yordam kerak?`;
+    const welcomeText = `Assalomu alaykum! Men ${BRAND.assistantName}, PaketShop.uz yordamchisiman. Bir martalik idish va qadoqlash materiallari bo'yicha mos mahsulot tanlashda va narxni hisoblashda yordam beraman. Qanday mahsulot kerak?`;
     const appUrl = process.env.APP_URL || "http://localhost:3000";
     
     // Try sending with inline button, fallback to plain text if Telegram rejects the URL

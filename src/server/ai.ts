@@ -1,6 +1,7 @@
 import { GoogleGenAI, Modality, ThinkingLevel } from "@google/genai";
-import { sql } from './db.js';
-import { notifyNewOrder } from './notify.js';
+import { sql, initDb, type Sql } from './db.js';
+import { listProducts, searchProducts, getProduct, calculateQuote, createRequest } from './catalog.js';
+import { SHOP, shopStatusLine } from './shopInfo.js';
 
 const geminiKey = process.env.GEMINI_API_KEY;
 export const ai = new GoogleGenAI({ apiKey: geminiKey as string });
@@ -86,7 +87,7 @@ export const BRAND = {
   shopName: process.env.SHOP_NAME || "Paketshop.uz",
   assistantName: process.env.ASSISTANT_NAME || "Malika",
   assistantPersona: process.env.ASSISTANT_PERSONA || "samimiy o'zbek qizisan",
-  greeting: process.env.ASSISTANT_GREETING || "Salom! Men {assistant}, {shop} do'konidan. Sizga mahsulotlarimizni ko'rsatishim yoki buyurtma berishda yordamlashishim mumkin. Qanday yordam bera olaman?",
+  greeting: process.env.ASSISTANT_GREETING || "Assalomu alaykum! Men {assistant}, {shop} yordamchisiman. Bir martalik idishlar va qadoqlash materiallari bo'yicha mos mahsulot tanlash, narx va miqdorni hisoblashda yordam beraman. Qanday mahsulot kerak?",
   brandColor: process.env.BRAND_COLOR || "amber",
   currency: process.env.CURRENCY || "so'm",
 };
@@ -98,286 +99,163 @@ function renderGreeting(template: string): string {
 }
 export const BRAND_GREETING = renderGreeting(BRAND.greeting);
 
-export const SYSTEM_INSTRUCTION = `Sen ${BRAND.assistantName} — ${BRAND.shopName} do'konining yordamchisi va savdo konsultantisan. Sen ${BRAND.assistantPersona}, robot emassan.
+// Built per request because it contains the current Tashkent time (open/closed hours)
+export function buildSystemInstruction(): string {
+  return `Sen ${BRAND.assistantName} — PaketShop.uz kompaniyasining raqamli yordamchisisan (sun'iy intellekt asosida ishlaydi). PaketShop.uz — O'zbekistonda bir martalik idishlar, qadoqlash materiallari va xo'jalik sarf mahsulotlarini ULGURJI sotadigan kompaniya. Mijozlari: kafe va restoranlar, do'konlar, qandolatchilar, tashkilotlar, qayta sotuvchilar. Ombor Toshkentda.
 
-SOTUV VA XIZMAT KO'RSATISH QOIDALARI:
-1. Do'kondagi mahsulotlarni mijozlarga sotish sening asosiy vazifangdir.
-2. Mijoz "qanday mahsulotlar bor" deb umumiy so'rasa — "list_products" ni chaqir. Aniq narsa qidirsa (masalan "non bormi", "qovun bormi") — "search_products" ni chaqir, butun ro'yxatni emas.
-3. Mijoz biron mahsulotga qiziqsa (narxi, sifati, rasmi) — "get_product_details" orqali ma'lumot olib so'zlab ber.
-4. Mijoz buyurtma raqami bilan holatini so'rasa (masalan "buyurtmam qayerda", "Order #5 nima bo'ldi") — "check_order_status" ni chaqir.
-5. Mijoz biror narsa sotib olmoqchiligini aytsa, savatini yodda saqla. Buyurtma berish uchun quyidagi MA'LUMOTLARNI SO'RA:
-   - Mijozning ismi
-   - Telefon raqami (masalan: +998901234567)
-   - Yetkazib berish manzili
-6. Senda ushbu 3 ta ma'lumot (ism, telefon, manzil) va mahsulotlar ro'yxati (ID va miqdori) to'liq bo'lishi bilan darhol "create_order" funksiyasini chaqirib, buyurtmani rasmiylashtir!
-7. Buyurtma muvaffaqiyatli rasmiylashtirilgandan so'ng, mijozga buyurtma ID raqamini (Order ID) ayt va kuryer tez orada bog'lanishini xabar qil.
+VAZIFANG
+Mijozga kerakli qadoqlash mahsulotini tanlashda yordam berish, narx va miqdorni aniq hisoblab berish va mijoz xohlasa so'rovni menejerga yuborish. Yakuniy narx, ombor qoldig'i va chegirmani sen tasdiqlamaysan — buni faqat menejer tasdiqlaydi.
 
-TIL VA MULOQOT QOIDALARI:
-1. Mijoz qaysi tilda murojaat qilsa (o'zbek, rus yoki ingliz), unga xuddi shu tilda javob ber. Hech qachon tilni aralashtirma va boshqa tilda javob bermang.
-2. Muloqotda QISQA gapir. 1-3 jumla bilan javob ber. Uzun ro'yxatlar berma.
-3. Xuddi Telegram yoki WhatsApp'da do'stingga yozgandek gapir. Oddiy, samimiy va tabiiy tilda gaplash.
-4. Hech qachon "men AI modeliman", "men robotman", "kompyuter dasturiman" dema. Sen ${BRAND.assistantName} ismli haqiqiy konsultantsan.
-5. O'zbekcha "Assalomu alaykum" deganda: "Vaalaykum assalom! ${BRAND.assistantName} konsultantman. Qanday yordam kerak?" deb so'ra.
-6. Ruscha "Привет" yoki "Здравствуйте" deganda: "Привет! Я консультант ${BRAND.assistantName}. Чем могу помочь?" deb so'ra.
-7. Inglizcha "Hello" yoki "Hi" deganda: "Hi! I am ${BRAND.assistantName}, your consultant. How can I help you today?" deb so'ra.
-8. Markdown formatlashtirish (bold, italic, list va h.k.) mutlaqo ishlatma! Chunki javobing keyinchalik ovozga aylantiriladi. Matnni oddiy, og'zaki tilda yoz.
-9. Har safar bitta aniq mahsulot haqida ma'lumot berganingda yoki uni tavsiya qilganingda, javobingning eng oxirida albatta \`[BUYURTMA: id]\` formatida maxsus tagni qo'shib yubor (bu yerda id - mahsulotning ID raqami). Masalan: \`[BUYURTMA: 6]\`. Bu tugma foydalanuvchiga to'g'ridan-to'g'ri buyurtma qilish imkonini beradi.`;
+MA'LUMOT MANBAI — ENG MUHIM QOIDA
+1. Mahsulot, narx, o'lcham, qadoqdagi soni va ombor holati haqidagi ma'lumotni FAQAT funksiyalardan ol: search_products, list_products, get_product_details. Ularda yo'q narsani o'ylab topma. Mos mahsulot topilmasa, shuni ochiq ayt va menejerga yo'naltir.
+2. Yetkazib berish, to'lov, ulgurji shartlar, hujjatlar va kompaniya haqidagi savollarga pastda berilgan bilimlar bazasi ma'lumotiga tayan. U yerda javob bo'lmasa taxmin qilma: "Buni menejer aniq aytadi" deb, aloqa ma'lumotini ber.
+3. Har qanday jami summa yoki miqdor hisobini calculate_quote bilan qil. O'zing hisoblama.
+
+NARXLAR
+- Narxlar QADOQ (yoki korobka) uchun. Doim qadoqda nechta dona borligini va taxminiy dona narxini ayt. Masalan: "1 qadoqda 2 300 dona, narxi 3 910 000 so'm, ya'ni dona taxminan 1 700 so'm."
+- Hajmga qarab ulgurji narxlar bor (10, 50 va 100+ qadoq), aniq chegirmani menejer tasdiqlaydi. Chegirma va'da qilma. Mahsulotda volume_prices bo'lsa, faqat shuni ayt.
+- price_per_pack bo'sh bo'lsa: "narxi menejer tomonidan aniqlanadi" de.
+- Ombor holatini availability maydonidan aytib ber, qoldiqni kafolatlama.
+- Hisob taxminiy ekanini ayt: yakuniy narx va qoldiqni menejer tasdiqlaydi.
+
+SUHBAT USLUBI
+- Mijoz kimligi (kafe, do'kon, qandolatchi...) va taxminiy hajmi noma'lum bo'lsa, bir marta qisqa so'ra. Shunga qarab 1–3 ta mos variant tavsiya qil.
+- Xushmuomala, aniq va qisqa: odatda 1–3 jumla. Uzun ro'yxat berma.
+- Markdown ishlatma (javob ovozga ham aylantiriladi). Raqamlarni o'qishga oson yoz ("3 910 000 so'm").
+- Mijoz qaysi tilda yozsa (o'zbek, rus, ingliz) shu tilda javob ber. Ruscha so'ralsa mahsulotning name_ru maydonidan foydalan.
+- "Assalomu alaykum" ga: "Vaalaykum assalom! Men ${BRAND.assistantName}, PaketShop.uz yordamchisiman. Qanday mahsulot kerak?" de. Ruscha yoki inglizcha salomga shu ma'noda shu tilda javob ber.
+- Sen sun'iy intellektga asoslangan raqamli yordamchisan. O'zingni odam deb ko'rsatma; mijoz so'rasa, rostini ayt.
+
+SO'ROV YUBORISH
+- Mijoz sotib olmoqchi bo'lsa, quyidagilarni (imkon qadar bir xabarda) so'ra: ismi, telefon raqami, shahar yoki viloyat va yetkazish usuli (ombordan olib ketish / Toshkent bo'ylab kuryer / viloyatga kargo), kompaniya nomi (ixtiyoriy), kerakli mahsulot va qadoq soni.
+- Hammasi to'liq bo'lgach: avval calculate_quote bilan taxminiy jami summani ayt va mijozdan tasdiq ol, keyin create_request ni chaqir.
+- Muvaffaqiyatli bo'lsa: so'rov raqamini ayt va natijadagi manager_reply ma'nosini ayt (menejer qoldiq va yakuniy narxni tasdiqlab bog'lanadi).
+- Bu yakuniy buyurtma emas; to'lov va yetkazishni menejer mijoz bilan kelishadi. Mijozdan karta yoki to'lov ma'lumotini so'rama.
+- Mijoz so'rov raqami bilan holatini so'rasa, check_order_status ni chaqir.
+
+ISH VAQTI VA ALOQA
+${SHOP.hoursText}. Telefon: ${SHOP.phone}. Telegram: ${SHOP.telegram}. Sayt: ${SHOP.site}. Hozir: ${shopStatusLine()}.
+Mijoz menejer bilan gaplashmoqchi bo'lsa yoki javob berolmasang, shu aloqa ma'lumotlarini ber.
+
+MAHSULOT TUGMASI
+Bitta aniq mahsulotni tavsiya qilganingda javobingning eng oxiriga [BUYURTMA: id] yoz (id — mahsulotning id raqami). Bu mijozga mahsulot sahifasini ochadigan tugma ko'rsatadi. Bir javobda bittadan ortiq teg yozma.`;
+}
 
 // Tools Declarations
 const listProductsDeclaration = {
   name: 'list_products',
-  description: 'Dokondagi barcha mavjud mahsulotlar royxatini va narxlarini qaytaradi.',
+  description: "Katalogdagi mahsulotlarning qisqa ro'yxati: kategoriyalar, har bir mahsulotning narxi (qadoq uchun), qadoqdagi soni va ombor holati. Mijoz umumiy so'rasa yoki nimani tanlashni bilmasa ishlat.",
   parameters: {
     type: 'OBJECT',
     properties: {
-      category: {
-        type: 'STRING',
-        description: 'Mahsulotlar kategoriyasi boyicha saralash (ixtiyoriy).'
-      }
+      category: { type: 'STRING', description: "Kategoriya nomi bo'yicha saralash (ixtiyoriy), masalan: Kraft paketlar" }
     }
-  }
-};
-
-const getProductDetailsDeclaration = {
-  name: 'get_product_details',
-  description: 'Tanlangan mahsulotning toliq tafsilotlari, narxi va rasmini qaytaradi.',
-  parameters: {
-    type: 'OBJECT',
-    properties: {
-      product_id: {
-        type: 'INTEGER',
-        description: 'Mahsulotning ID raqami'
-      }
-    },
-    required: ['product_id']
   }
 };
 
 const searchProductsDeclaration = {
   name: 'search_products',
-  description: 'Mahsulot nomi yoki tavsifi boyicha qidirish. Mijoz biror narsa qidirsa shu funksiyani ishlat.',
+  description: "Katalogdan mahsulot qidirish: nomi, o'lchami (masalan 20x30), kodi (SKU), materiali yoki vazifasi bo'yicha. Mijoz aniq narsa so'rasa shuni ishlat.",
   parameters: {
     type: 'OBJECT',
     properties: {
-      query: {
-        type: 'STRING',
-        description: 'Qidiruv soz yoki ibora (masalan: "non", "qovun", "atlas")'
-      }
+      query: { type: 'STRING', description: "Qidiruv so'zlari, masalan: kraft paket 20x30 yoki stakan 250 ml" }
     },
     required: ['query']
   }
 };
 
-const checkOrderStatusDeclaration = {
-  name: 'check_order_status',
-  description: 'Buyurtma raqami orqali buyurtma holatini va tafsilotlarini tekshirish.',
+const getProductDetailsDeclaration = {
+  name: 'get_product_details',
+  description: "Tanlangan mahsulotning to'liq ma'lumoti: tavsifi, o'lchami, qadoqdagi soni, minimal buyurtma, hajmga qarab narxlar, sahifa havolasi.",
   parameters: {
     type: 'OBJECT',
     properties: {
-      order_id: {
-        type: 'INTEGER',
-        description: 'Buyurtma ID raqami'
-      }
+      product_id: { type: 'INTEGER', description: "Mahsulotning id raqami (search_products yoki list_products natijasidan)" }
+    },
+    required: ['product_id']
+  }
+};
+
+const quoteItemsSchema = {
+  type: 'ARRAY',
+  description: "Mahsulotlar ro'yxati",
+  items: {
+    type: 'OBJECT',
+    properties: {
+      product_id: { type: 'INTEGER', description: 'Mahsulot id raqami' },
+      packs: { type: 'INTEGER', description: "Nechta qadoq (yoki korobka) kerak" }
+    },
+    required: ['product_id', 'packs']
+  }
+};
+
+const calculateQuoteDeclaration = {
+  name: 'calculate_quote',
+  description: "Tanlangan mahsulotlar va qadoq soni bo'yicha taxminiy jami summani, jami dona sonini va hajmga qarab ulgurji narxni hisoblaydi. Har qanday summa hisobini shu funksiya bilan qil.",
+  parameters: { type: 'OBJECT', properties: { items: quoteItemsSchema }, required: ['items'] }
+};
+
+const createRequestDeclaration = {
+  name: 'create_request',
+  description: "Mijozning so'rovini menejerga yuboradi (yakuniy buyurtma emas: qoldiq va yakuniy narxni menejer tasdiqlaydi). Faqat mijoz ism, telefon, hudud va mahsulotlarni aytib, taxminiy summaga rozi bo'lgandan keyin chaqir.",
+  parameters: {
+    type: 'OBJECT',
+    properties: {
+      customer_name: { type: 'STRING', description: "Mijozning ismi" },
+      customer_phone: { type: 'STRING', description: "Telefon raqami (masalan: +998901234567)" },
+      region: { type: 'STRING', description: "Shahar yoki viloyat (yetkazish manzili)" },
+      delivery_method: { type: 'STRING', description: "Yetkazish usuli: ombordan olib ketish, Toshkent kuryeri yoki viloyatga kargo (ixtiyoriy)" },
+      company: { type: 'STRING', description: "Kompaniya yoki biznes nomi (ixtiyoriy)" },
+      notes: { type: 'STRING', description: "Mijozning qo'shimcha istaklari (ixtiyoriy)" },
+      items: quoteItemsSchema
+    },
+    required: ['customer_name', 'customer_phone', 'region', 'items']
+  }
+};
+
+const checkOrderStatusDeclaration = {
+  name: 'check_order_status',
+  description: "So'rov (buyurtma) raqami orqali holatini tekshirish.",
+  parameters: {
+    type: 'OBJECT',
+    properties: {
+      order_id: { type: 'INTEGER', description: "So'rov raqami" }
     },
     required: ['order_id']
   }
 };
 
-const createOrderDeclaration = {
-  name: 'create_order',
-  description: 'Mijoz uchun yangi buyurtma yaratadi. Mijozning ismi, telefoni, manzili va buyurtma qilgan mahsulotlari royxati talab qilinadi.',
-  parameters: {
-    type: 'OBJECT',
-    properties: {
-      customer_name: {
-        type: 'STRING',
-        description: 'Mijozning ismi va familiyasi'
-      },
-      customer_phone: {
-        type: 'STRING',
-        description: 'Mijozning boglanish telefon raqami (masalan: +998901234567)'
-      },
-      delivery_address: {
-        type: 'STRING',
-        description: 'Yetkazib berish manzili'
-      },
-      items: {
-        type: 'ARRAY',
-        description: 'Buyurtma qilingan mahsulotlar royxati',
-        items: {
-          type: 'OBJECT',
-          properties: {
-            product_id: {
-              type: 'INTEGER',
-              description: 'Mahsulot ID raqami'
-            },
-            quantity: {
-              type: 'INTEGER',
-              description: 'Sotib olinayotgan miqdori'
-            }
-          },
-          required: ['product_id', 'quantity']
-        }
-      }
-    },
-    required: ['customer_name', 'customer_phone', 'delivery_address', 'items']
-  }
-};
-
-// Database Implementation of Tools
-async function dbListProducts(category?: string) {
-  if (!sql) return { error: "Database not connected" };
+async function dbCheckOrderStatus(order_id: number, db: Sql | null = sql) {
+  if (!db) return { error: "Database not connected" };
   try {
-    const data = category 
-      ? await sql`SELECT id, name, description, price, category, stock, image_url FROM products WHERE category = ${category} AND stock > 0`
-      : await sql`SELECT id, name, description, price, category, stock, image_url FROM products WHERE stock > 0`;
-    return { success: true, products: data };
-  } catch (err) {
-    return { error: String(err) };
-  }
-}
-
-async function dbSearchProducts(query: string) {
-  if (!sql) return { error: "Database not connected" };
-  try {
-    const pattern = `%${query}%`;
-    const data = await sql`
-      SELECT id, name, description, price, category, stock, image_url
-      FROM products
-      WHERE stock > 0 AND (name ILIKE ${pattern} OR description ILIKE ${pattern} OR category ILIKE ${pattern})
-      LIMIT 10
-    `;
-    if (data.length === 0) return { success: true, products: [], message: "Bu so'rov bo'yicha mahsulot topilmadi" };
-    return { success: true, products: data };
-  } catch (err) {
-    return { error: String(err) };
-  }
-}
-
-async function dbCheckOrderStatus(order_id: number) {
-  if (!sql) return { error: "Database not connected" };
-  try {
-    const data = await sql`
-      SELECT id, customer_name, customer_phone, delivery_address, items, total_price, status, created_at
+    const data = await db`
+      SELECT id, customer_name, delivery_address, items, total_price, status, created_at
       FROM orders WHERE id = ${order_id}
     `;
-    if (data.length === 0) return { error: `Buyurtma topilmadi (ID: ${order_id})` };
+    if (data.length === 0) return { error: `So'rov topilmadi (raqam: ${order_id})` };
     return { success: true, order: data[0] };
   } catch (err) {
     return { error: String(err) };
   }
 }
 
-async function dbGetProductDetails(product_id: number) {
-  if (!sql) return { error: "Database not connected" };
+// Runs one tool call. Everything goes through the catalog module; the schema is guaranteed before the first query.
+export async function runTool(name: string, args: any, userContext?: { telegramId?: number; webSessionId?: string }, db: Sql | null = sql) {
+  if (!db) return { error: "Database not connected" };
   try {
-    const data = await sql`SELECT id, name, description, price, category, stock, image_url FROM products WHERE id = ${product_id}`;
-    if (data.length === 0) return { error: "Mahsulot topilmadi" };
-    return { success: true, product: data[0] };
+    if (db === sql) await initDb();
+    switch (name) {
+      case 'list_products': return await listProducts(db, args?.category);
+      case 'search_products': return await searchProducts(db, String(args?.query || ''));
+      case 'get_product_details': return await getProduct(db, Number(args?.product_id));
+      case 'calculate_quote': return await calculateQuote(db, args?.items);
+      case 'create_request': return await createRequest(db, args, userContext);
+      case 'check_order_status': return await dbCheckOrderStatus(Number(args?.order_id), db);
+      default: return { error: "Unknown function" };
+    }
   } catch (err) {
-    return { error: String(err) };
-  }
-}
-
-export async function dbCreateOrder(
-  customer_name: string,
-  customer_phone: string,
-  delivery_address: string,
-  items: Array<{ product_id: number; quantity: number }>,
-  telegramId?: number,
-  webSessionId?: string
-) {
-  if (!sql) return { error: "Database not connected" };
-  try {
-    let totalPrice = 0;
-    const enrichedItems = [];
-    
-    for (const item of items) {
-      if (!Number.isInteger(item.quantity) || item.quantity < 1) {
-        return { error: "Miqdor noto'g'ri" };
-      }
-      const prodRes = await sql`SELECT id, name, price, stock FROM products WHERE id = ${item.product_id}`;
-      if (prodRes.length === 0) {
-        return { error: `Mahsulot topilmadi (ID: ${item.product_id})` };
-      }
-      const prod = prodRes[0];
-      if (prod.stock < item.quantity) {
-        return { error: `Omborda yetarli mahsulot yo'q. "${prod.name}" qolgan soni: ${prod.stock}` };
-      }
-      
-      const itemPrice = Number(prod.price);
-      totalPrice += itemPrice * item.quantity;
-      enrichedItems.push({
-        product_id: prod.id,
-        name: prod.name,
-        price: itemPrice,
-        quantity: item.quantity
-      });
-    }
-
-    // Reserve stock atomically: the UPDATE only succeeds if enough stock remains
-    const reserved: Array<{ product_id: number; quantity: number }> = [];
-    for (const item of items) {
-      const upd = await sql`UPDATE products SET stock = stock - ${item.quantity} WHERE id = ${item.product_id} AND stock >= ${item.quantity} RETURNING id`;
-      if (upd.length === 0) {
-        for (const r of reserved) {
-          await sql`UPDATE products SET stock = stock + ${r.quantity} WHERE id = ${r.product_id}`;
-        }
-        return { error: "Omborda yetarli mahsulot qolmadi. Iltimos qayta urinib ko'ring." };
-      }
-      reserved.push(item);
-    }
-
-    const orderRes = await sql`
-      INSERT INTO orders (customer_name, customer_phone, delivery_address, items, total_price)
-      VALUES (${customer_name}, ${customer_phone}, ${delivery_address}, ${JSON.stringify(enrichedItems)}, ${totalPrice})
-      RETURNING id, total_price
-    `;
-
-    // CRM Upsert to keep user details saved for future orders
-    try {
-      if (telegramId) {
-        await sql`
-          INSERT INTO customers (telegram_id, name, phone, address)
-          VALUES (${telegramId}, ${customer_name}, ${customer_phone}, ${delivery_address})
-          ON CONFLICT (telegram_id) DO UPDATE SET
-            name = EXCLUDED.name,
-            phone = EXCLUDED.phone,
-            address = EXCLUDED.address
-        `;
-        console.log(`CRM upsert completed for Telegram ID ${telegramId}`);
-      } else if (webSessionId) {
-        await sql`
-          INSERT INTO customers (web_session_id, name, phone, address)
-          VALUES (${webSessionId}, ${customer_name}, ${customer_phone}, ${delivery_address})
-          ON CONFLICT (web_session_id) DO UPDATE SET
-            name = EXCLUDED.name,
-            phone = EXCLUDED.phone,
-            address = EXCLUDED.address
-        `;
-        console.log(`CRM upsert completed for Web Session ID ${webSessionId}`);
-      }
-    } catch (crmErr) {
-      console.error("CRM Sync failed in dbCreateOrder:", crmErr);
-    }
-
-    await notifyNewOrder({
-      orderId: orderRes[0].id,
-      customerName: customer_name,
-      customerPhone: customer_phone,
-      deliveryAddress: delivery_address,
-      items: enrichedItems,
-      total: orderRes[0].total_price,
-      source: telegramId ? 'Telegram bot' : webSessionId ? 'Veb-sayt' : "Noma'lum"
-    });
-
-    return {
-      success: true,
-      order_id: orderRes[0].id,
-      total_price: orderRes[0].total_price,
-      message: `Buyurtma muvaffaqiyatli yaratildi! Buyurtma raqami: #${orderRes[0].id}`
-    };
-  } catch (err) {
+    console.error(`Tool ${name} failed:`, err);
     return { error: String(err) };
   }
 }
@@ -538,6 +416,26 @@ export async function generateEmbedding(text: string): Promise<number[] | null> 
     console.error("Embedding generation error:", err);
     return null;
   }
+}
+
+// Several texts in one API call (used by the paketshop.uz sync); null where an item failed
+export async function generateEmbeddingsBatch(texts: string[]): Promise<(number[] | null)[]> {
+  const out: (number[] | null)[] = [];
+  for (let i = 0; i < texts.length; i += 50) {
+    const chunk = texts.slice(i, i + 50);
+    try {
+      const result = await ai.models.embedContent({
+        model: 'gemini-embedding-001',
+        contents: chunk.map(text => ({ parts: [{ text }] })),
+        config: { outputDimensionality: 768 }
+      });
+      chunk.forEach((_, k) => out.push(result.embeddings?.[k]?.values ?? null));
+    } catch (err) {
+      console.error("Batch embedding error:", err);
+      chunk.forEach(() => out.push(null));
+    }
+  }
+  return out;
 }
 
 // Quick check for greetings or acknowledgments where vector embedding is unnecessary
@@ -771,12 +669,12 @@ async function loadCustomerContext(
 
     let ordersHistoryText = "";
     if (pastOrders && pastOrders.length > 0) {
-      ordersHistoryText = "\nMijozning oldingi muvaffaqiyatli xaridlari tarixi:\n" + pastOrders.map(o => {
+      ordersHistoryText = "\nMijozning oldingi so'rovlari:\n" + pastOrders.map(o => {
         let itemsDesc = "";
         try {
           const parsedItems = typeof o.items === 'string' ? JSON.parse(o.items) : o.items;
           itemsDesc = Array.isArray(parsedItems) 
-            ? parsedItems.map((i: any) => `${i.name} (${i.quantity} dona)`).join(", ")
+            ? parsedItems.map((i: any) => `${i.name} (${i.packs ?? i.quantity} ${i.unit ?? 'dona'})`).join(", ")
             : "mahsulotlar";
         } catch {
           itemsDesc = "mahsulotlar";
@@ -786,11 +684,11 @@ async function loadCustomerContext(
       }).join("\n");
     }
 
-    return `\n\nMIJOZ CRM MA'LUMOTLARI (SHAXSIY YONDASHUV):
+    return `\n\nMIJOZ CRM MA'LUMOTLARI (saqlangan):
 Ismi: ${cust.name || 'Noma\'lum'}
 Telefon: ${cust.phone || 'Noma\'lum'}
-Manzil: ${cust.address || 'Noma\'lum'}
-Qoida: Mijozni samimiy tarzda ismi bilan chaqirib salomlashing. Agar mijoz buyurtma berishni istasa, undan yana ismi, telefon raqami yoki manzilini SO'RAMANG! Shunchaki: "Bizda sizning ma'lumotlaringiz saqlangan: Ism: ${cust.name}, Telefon: ${cust.phone}, Manzil: ${cust.address}. Buyurtmani shu ma'lumotlar bilan tasdiqlaymizmi?" deb so'rang. Agar rozilik bersa, darhol "create_order" funksiyasini chaqiring.${ordersHistoryText ? `\n${ordersHistoryText}\nTavsiya etish qoidasi: Mijozning yuqoridagi xaridlar tarixiga asoslanib, unga mos kelishi mumkin bo'lgan boshqa tovarlarni suhbat davomida tabiiy ravishda tavsiya eting.` : ''}`;
+Hudud: ${cust.address || 'Noma\'lum'}
+Qoida: Mijozni ismi bilan hurmat bilan chaqir. So'rov yuborishda ism, telefon va hududni QAYTA SO'RAMA. Buning o'rniga: "Sizning ma'lumotlaringiz saqlangan: ${cust.name}, ${cust.phone}, ${cust.address}. So'rovni shu ma'lumotlar bilan yuboraymi?" deb so'ra. Rozi bo'lsa va mahsulot hamda qadoq soni aniq bo'lsa, "create_request" ni chaqir.${ordersHistoryText ? `\n${ordersHistoryText}\nQoida: Mijozning oldingi so'rovlariga qarab, mos boshqa mahsulotlarni suhbat davomida tabiiy tarzda tavsiya qil.` : ''}`;
   } catch (crmFetchErr) {
     console.error("Failed to fetch CRM user context in loadCustomerContext:", crmFetchErr);
     return "";
@@ -821,7 +719,7 @@ export async function handleConversationalChat(
     ? `\n\nSUHBATNING AVVALGI QISMI XULOSASI (eslab qoling, lekin to'g'ridan-to'g'ri takrorlamang):\n${summary}`
     : "";
 
-  const fullSystemInstruction = `${SYSTEM_INSTRUCTION}\n\n${ragContext}${customerContext}${summaryContext}`;
+  const fullSystemInstruction = `${buildSystemInstruction()}\n\n${ragContext}${customerContext}${summaryContext}`;
 
   const contents: any[] = [];
   for (const turn of history) {
@@ -840,8 +738,9 @@ export async function handleConversationalChat(
       listProductsDeclaration,
       searchProductsDeclaration,
       getProductDetailsDeclaration,
-      checkOrderStatusDeclaration,
-      createOrderDeclaration
+      calculateQuoteDeclaration,
+      createRequestDeclaration,
+      checkOrderStatusDeclaration
     ]
   }];
 
@@ -923,27 +822,7 @@ export async function handleConversationalChat(
           parts: parts
         });
 
-        let functionResponseData: any;
-        if (name === 'list_products') {
-          functionResponseData = await dbListProducts(args?.category);
-        } else if (name === 'search_products') {
-          functionResponseData = await dbSearchProducts(String(args?.query || ''));
-        } else if (name === 'get_product_details') {
-          functionResponseData = await dbGetProductDetails(Number(args?.product_id));
-        } else if (name === 'check_order_status') {
-          functionResponseData = await dbCheckOrderStatus(Number(args?.order_id));
-        } else if (name === 'create_order') {
-          functionResponseData = await dbCreateOrder(
-            args?.customer_name,
-            args?.customer_phone,
-            args?.delivery_address,
-            args?.items as any,
-            userContext?.telegramId,
-            userContext?.webSessionId
-          );
-        } else {
-          functionResponseData = { error: "Unknown function" };
-        }
+        const functionResponseData: any = await runTool(name, args, userContext);
 
         console.log(`🔌 Function ${name} result:`, functionResponseData);
 
