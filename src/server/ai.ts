@@ -536,7 +536,8 @@ export async function getKnowledgeBaseContext() {
 }
 
 // Generate TTS speech audio from text using Gemini 3.1
-const TTS_MODEL = 'gemini-3.8-flash-tts';
+export const TTS_MODELS = { flash: 'gemini-3.8-flash-tts', lite: 'gemini-3.8-flash-lite-tts' } as const;
+const TTS_MODEL = process.env.GEMINI_TTS_MODEL || TTS_MODELS.flash;
 const TTS_FALLBACK_MODEL = 'gemini-3.1-flash-tts-preview';
 const TTS_SAMPLE_RATE = 24000;
 
@@ -573,7 +574,7 @@ function wavToPcm(buf: Buffer): Buffer {
   return buf.subarray(44);
 }
 
-async function synthesizeWithTtsModel(text: string): Promise<string | null> {
+async function synthesizeWithTtsModel(text: string, ttsModel: string = TTS_MODEL): Promise<string | null> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return null;
   const res = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
@@ -581,7 +582,7 @@ async function synthesizeWithTtsModel(text: string): Promise<string | null> {
     headers: { 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' },
     signal: AbortSignal.timeout(30000),
     body: JSON.stringify({
-      model: TTS_MODEL,
+      model: ttsModel,
       input: [{
         type: 'user_input',
         content: [{
@@ -595,14 +596,16 @@ async function synthesizeWithTtsModel(text: string): Promise<string | null> {
     })
   });
   if (!res.ok) {
-    throw new Error(`${TTS_MODEL} HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    throw new Error(`${ttsModel} HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
   }
   const audio = findAudioData(await res.json());
   if (!audio) return null;
   return wavToPcm(Buffer.from(audio, 'base64')).toString('base64');
 }
 
-export async function generateSpeech(text: string): Promise<string | null> {
+// Returns the raw PCM audio plus which model produced it and how long it took (used for model comparisons)
+export async function generateSpeechDetailed(text: string, model?: string): Promise<{ audio: string | null; model: string | null; ms: number }> {
+  const started = Date.now();
   const cleanText = text
     .replace(/\[IMAGE:\s*(.*?)\]/gi, '')
     .replace(/\[VIDEO:\s*(.*?)\]/gi, '')
@@ -612,11 +615,12 @@ export async function generateSpeech(text: string): Promise<string | null> {
     .replace(/[#*_]/g, '')
     .trim();
 
-  if (!cleanText) return null;
+  if (!cleanText) return { audio: null, model: null, ms: 0 };
 
+  const primary = model || TTS_MODEL;
   try {
-    const pcm = await synthesizeWithTtsModel(cleanText);
-    if (pcm) return pcm;
+    const pcm = await synthesizeWithTtsModel(cleanText, primary);
+    if (pcm) return { audio: pcm, model: primary, ms: Date.now() - started };
   } catch (err) {
     console.warn("TTS model failed, falling back to preview model:", err);
   }
@@ -634,11 +638,16 @@ export async function generateSpeech(text: string): Promise<string | null> {
         },
       },
     });
-    return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || null;
+    const audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || null;
+    return { audio, model: audio ? TTS_FALLBACK_MODEL : null, ms: Date.now() - started };
   } catch (err) {
     console.error("Speech generation error in backend:", err);
-    return null;
+    return { audio: null, model: null, ms: Date.now() - started };
   }
+}
+
+export async function generateSpeech(text: string, model?: string): Promise<string | null> {
+  return (await generateSpeechDetailed(text, model)).audio;
 }
 
 async function loadCustomerContext(
@@ -697,6 +706,7 @@ Qoida: Mijozni ismi bilan hurmat bilan chaqir. So'rov yuborishda ism, telefon va
     return "";
   }
 }
+
 
 // Conversational Chat Handler with Function Calling Loop, Parallel Pre-fetch, and Native Streaming
 // A photo the customer sent (e.g. a sample cup: "do you have this?")

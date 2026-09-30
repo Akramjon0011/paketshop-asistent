@@ -2,7 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import { v2 as cloudinary } from 'cloudinary';
 import { sql, initDb } from './db.js';
-import { generateEmbedding, searchKnowledgeBase, handleConversationalChat, handleConversationalChatStream, transcribeAudio, generateSpeech, BRAND, BRAND_GREETING, appendHistory } from './ai.js';
+import { generateEmbedding, searchKnowledgeBase, handleConversationalChat, handleConversationalChatStream, transcribeAudio, generateSpeech, generateSpeechDetailed, TTS_MODELS, BRAND, BRAND_GREETING, appendHistory } from './ai.js';
 import { GoogleGenAI } from "@google/genai";
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -415,8 +415,11 @@ router.post("/tts", aiLimiter, async (req, res) => {
     return res.status(400).json({ error: "Matn noto'g'ri yoki juda uzun" });
   }
   try {
-    const audio = await generateSpeech(text);
-    res.json({ audio });
+    // ?model=lite|flash lets the two TTS models be compared on the same text; default is the configured one
+    const requested = String(req.query.model || '');
+    const model = requested === 'lite' ? TTS_MODELS.lite : requested === 'flash' ? TTS_MODELS.flash : undefined;
+    const result = await generateSpeechDetailed(text, model);
+    res.json({ audio: result.audio, model: result.model, ms: result.ms });
   } catch (err) {
     console.error("TTS route error:", err);
     res.status(500).json({ error: "Ovoz yaratib bo'lmadi" });
