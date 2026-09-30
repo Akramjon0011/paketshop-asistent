@@ -81,6 +81,23 @@ function describeErr(err: any): string {
   return err?.response?.description ? `${err.response.error_code} ${err.response.description}` : String(err?.message || err);
 }
 
+// Keeps the last few bot events in the DB so /api/telegram-status can show what happened (serverless logs are hard to reach)
+async function recordBotEvent(kind: string, detail?: string) {
+  if (!sql) return;
+  try {
+    const rows = await sql`SELECT value FROM app_settings WHERE key = 'telegram_events'`;
+    let events: any[] = [];
+    try { events = JSON.parse(rows[0]?.value || '[]'); } catch { /* start fresh */ }
+    events.unshift({ at: new Date().toISOString(), kind, detail: detail?.slice(0, 200) });
+    const value = JSON.stringify(events.slice(0, 8));
+    await sql`
+      INSERT INTO app_settings (key, value, updated_at)
+      VALUES ('telegram_events', ${value}, CURRENT_TIMESTAMP)
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
+    `;
+  } catch { /* diagnostics must never break the bot */ }
+}
+
 export function setupBot(app: any) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken || botToken === 'MY_TELEGRAM_BOT_TOKEN') {
@@ -154,10 +171,12 @@ export function setupBot(app: any) {
       }
     } catch (replyErr: any) {
       console.warn("/start reply with button failed, sending plain text:", replyErr.message);
+      await recordBotEvent('start_button_reply_failed', describeErr(replyErr));
       try {
         await ctx.reply(welcomeText);
       } catch (plainErr) {
-        console.error("/start plain text reply also failed:", plainErr);
+        console.error("/start plain text reply also failed:", describeErr(plainErr));
+        await recordBotEvent('start_reply_failed', describeErr(plainErr));
       }
     }
     
@@ -176,7 +195,8 @@ export function setupBot(app: any) {
          }
       }
     } catch (voiceErr) {
-      console.error("Error sending voice message to Telegram on start:", voiceErr);
+      console.error("Error sending voice message to Telegram on start:", describeErr(voiceErr));
+      await recordBotEvent('start_voice_failed', describeErr(voiceErr));
     }
   });
 
@@ -310,7 +330,8 @@ export function setupBot(app: any) {
       }
 
     } catch (err: any) {
-      console.error("Bot error in processMessage:", err);
+      console.error("Bot error in processMessage:", describeErr(err));
+      await recordBotEvent('process_error', describeErr(err));
       try {
         await ctx.telegram.sendMessage(chatId, "Uzur, texnik xatolik yuz berdi. Iltimos qayta urinib ko'ring.", replyOptions);
       } catch (sendErr) {
@@ -338,7 +359,10 @@ export function setupBot(app: any) {
     await processMessage(ctx, businessMessage, isVoice, businessMessage.business_connection_id);
   });
 
-  bot.catch((err: any) => console.error("Bot error:", err));
+  bot.catch(async (err: any) => {
+    console.error("Bot error:", describeErr(err));
+    await recordBotEvent('bot_error', describeErr(err));
+  });
 
   if (process.env.VERCEL) {
       console.log("Running in Vercel Serverless Webhook mode");
@@ -354,7 +378,14 @@ export function setupBot(app: any) {
           // Diagnostics: what Telegram thinks about our webhook (no secrets in the output)
           let statusMemo: { at: number; body: any } | null = null;
           app.get('/api/telegram-status', async (_req: any, res: any) => {
-            if (statusMemo && Date.now() - statusMemo.at < 15000) return res.json(statusMemo.body);
+            let events: any[] = [];
+            if (sql) {
+              try {
+                const rows = await sql`SELECT value FROM app_settings WHERE key = 'telegram_events'`;
+                events = JSON.parse(rows[0]?.value || '[]');
+              } catch { /* no events yet */ }
+            }
+            if (statusMemo && Date.now() - statusMemo.at < 15000) return res.json({ ...statusMemo.body, events });
             try {
               const [me, info] = await Promise.all([bot.telegram.getMe(), bot.telegram.getWebhookInfo()]);
               const body = {
@@ -367,7 +398,7 @@ export function setupBot(app: any) {
                 lastErrorMessage: info.last_error_message || null
               };
               statusMemo = { at: Date.now(), body };
-              res.json(body);
+              res.json({ ...body, events });
             } catch (err) {
               res.status(500).json({ error: describeErr(err) });
             }
@@ -378,11 +409,14 @@ export function setupBot(app: any) {
             }
             const updateId = req.body?.update_id || 'unknown';
             console.log(`📨 Webhook received update #${updateId}`);
+            const updateType = Object.keys(req.body || {}).find(k => k !== 'update_id') || 'unknown';
             try {
               await bot.handleUpdate(req.body);
               console.log(`✅ Update #${updateId} processed`);
+              await recordBotEvent('handled', `${updateType} #${updateId}`);
             } catch (err) {
               console.error(`❌ Update #${updateId} error:`, describeErr(err));
+              await recordBotEvent('handle_error', `${updateType} #${updateId}: ${describeErr(err)}`);
             }
             res.status(200).json({ ok: true });
           });
