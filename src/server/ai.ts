@@ -2,6 +2,7 @@ import { GoogleGenAI, Modality, ThinkingLevel } from "@google/genai";
 import { sql, initDb, type Sql } from './db.js';
 import { listProducts, searchProducts, getProduct, calculateQuote, createRequest } from './catalog.js';
 import { SHOP, shopStatusLine } from './shopInfo.js';
+import { recordEvent } from './events.js';
 
 const geminiKey = process.env.GEMINI_API_KEY;
 export const ai = new GoogleGenAI({ apiKey: geminiKey as string });
@@ -19,6 +20,13 @@ function isTransientGeminiError(err: any): boolean {
   return /UNAVAILABLE|high demand|overloaded|RESOURCE_EXHAUSTED|fetch failed|ETIMEDOUT|ECONNRESET/i.test(String(err?.message || err));
 }
 
+// A daily quota ("10 requests per day on Free Tier") won't clear in a second: don't retry the same model
+const isDailyQuotaError = (err: any) => /per day|PerDay|daily/i.test(String(err?.message || err));
+
+// Remember Gemini problems (quota, timeouts) where /api/telegram-status can show them
+const noteGeminiProblem = (kind: string, model: string, err: unknown) =>
+  recordEvent(kind, `${model}: ${String((err as any)?.message || err).replace(/\s+/g, ' ').slice(0, 200)}`, 'gemini_events');
+
 // generateContent with one quick retry on the primary model, then one attempt (plus retry) on the fallback model
 export async function generateContentResilient(params: Parameters<typeof ai.models.generateContent>[0]) {
   const models = [params.model, CHAT_FALLBACK_MODEL].filter((m, i, arr) => m && arr.indexOf(m) === i);
@@ -33,6 +41,7 @@ export async function generateContentResilient(params: Parameters<typeof ai.mode
         lastErr = err;
         if (controller.signal.aborted) {
           console.warn(`Gemini ${model} timed out after ${GEMINI_CALL_TIMEOUT_MS}ms, switching model`);
+          await noteGeminiProblem('gemini_timeout', model, `no answer within ${GEMINI_CALL_TIMEOUT_MS}ms`);
           break; // don't retry a model that just stalled
         }
         if (Number((err as any)?.status) === 400 && /think/i.test(String((err as any)?.message)) && params.config?.thinkingConfig) {
@@ -42,6 +51,8 @@ export async function generateContentResilient(params: Parameters<typeof ai.mode
         }
         if (!isTransientGeminiError(err)) throw err;
         console.warn(`Gemini ${model} transient error (attempt ${attempt + 1}):`, (err as any)?.status ?? '', String((err as any)?.message || err).slice(0, 120));
+        await noteGeminiProblem('gemini_error', model, err);
+        if (isDailyQuotaError(err)) break;
         if (attempt === 0) await new Promise(r => setTimeout(r, 700));
       } finally {
         clearTimeout(timer);
@@ -65,6 +76,7 @@ export async function generateContentStreamResilient(params: Parameters<typeof a
         lastErr = err;
         if (controller.signal.aborted) {
           console.warn(`Gemini stream ${model} timed out after ${GEMINI_CALL_TIMEOUT_MS}ms, switching model`);
+          await noteGeminiProblem('gemini_timeout', model, `stream did not start within ${GEMINI_CALL_TIMEOUT_MS}ms`);
           break;
         }
         if (Number((err as any)?.status) === 400 && /think/i.test(String((err as any)?.message)) && params.config?.thinkingConfig) {
@@ -74,6 +86,8 @@ export async function generateContentStreamResilient(params: Parameters<typeof a
         }
         if (!isTransientGeminiError(err)) throw err;
         console.warn(`Gemini stream ${model} transient error (attempt ${attempt + 1}):`, (err as any)?.status ?? '', String((err as any)?.message || err).slice(0, 120));
+        await noteGeminiProblem('gemini_error', model, err);
+        if (isDailyQuotaError(err)) break;
         if (attempt === 0) await new Promise(r => setTimeout(r, 700));
       } finally {
         clearTimeout(timer);
@@ -617,15 +631,22 @@ export async function generateSpeechDetailed(text: string, model?: string): Prom
 
   if (!cleanText) return { audio: null, model: null, ms: 0 };
 
+  // Quotas are per model, so when the chosen model is exhausted or failing, try its 3.8 sibling before the old preview.
+  // (An explicit `model` — used to compare models — is tried alone.)
   const primary = model || TTS_MODEL;
+  const chain = model ? [primary] : [primary, ...Object.values(TTS_MODELS).filter(m => m !== primary)];
   let primaryError: string | undefined;
-  try {
-    const pcm = await synthesizeWithTtsModel(cleanText, primary);
-    if (pcm) return { audio: pcm, model: primary, ms: Date.now() - started };
-    primaryError = 'no audio in response';
-  } catch (err) {
-    primaryError = String((err as any)?.message || err).slice(0, 240);
-    console.warn("TTS model failed, falling back to preview model:", primaryError);
+  for (const ttsModel of chain) {
+    try {
+      const pcm = await synthesizeWithTtsModel(cleanText, ttsModel);
+      if (pcm) return { audio: pcm, model: ttsModel, ms: Date.now() - started, primaryError };
+      primaryError ??= `${ttsModel}: no audio in response`;
+    } catch (err) {
+      const message = String((err as any)?.message || err).slice(0, 240);
+      primaryError ??= message;
+      console.warn("TTS model failed, trying the next one:", message);
+      await recordEvent('tts_error', message, 'gemini_events');
+    }
   }
 
   try {

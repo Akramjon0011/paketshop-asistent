@@ -2,6 +2,7 @@ import { Telegraf, Markup } from "telegraf";
 import { handleConversationalChat, generateSpeech, transcribeAudio, generateEmbeddingsBatch, BRAND } from './ai.js';
 import { sql, initDb } from './db.js';
 import { adminChatIds } from './notify.js';
+import { recordEvent as recordBotEvent, readEvents } from './events.js';
 import { planCatalogSync, applyCatalogSync, type SyncPlan } from './catalog.js';
 import { Mp3Encoder } from '@breezystack/lamejs';
 import { createHash } from 'crypto';
@@ -80,23 +81,6 @@ function describePlan(plan: SyncPlan): string {
   if (plan.site.errors.length) lines.push('', `Saytni o'qishda xatolar: ${plan.site.errors.length}`, ...plan.site.errors.slice(0, 3));
   if (plan.problems.length) lines.push('', '⚠️ ' + plan.problems.join('; '));
   return lines.join('\n').slice(0, 3800);
-}
-
-// Keeps the last few bot events in the DB so /api/telegram-status can show what happened (serverless logs are hard to reach)
-async function recordBotEvent(kind: string, detail?: string) {
-  if (!sql) return;
-  try {
-    const rows = await sql`SELECT value FROM app_settings WHERE key = 'telegram_events'`;
-    let events: any[] = [];
-    try { events = JSON.parse(rows[0]?.value || '[]'); } catch { /* start fresh */ }
-    events.unshift({ at: new Date().toISOString(), kind, detail: detail?.slice(0, 200) });
-    const value = JSON.stringify(events.slice(0, 8));
-    await sql`
-      INSERT INTO app_settings (key, value, updated_at)
-      VALUES ('telegram_events', ${value}, CURRENT_TIMESTAMP)
-      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
-    `;
-  } catch { /* diagnostics must never break the bot */ }
 }
 
 export function setupBot(app: any) {
@@ -436,14 +420,8 @@ Bilimlar bazasi: ${res.knowledge} bo'lim (${res.embedded} tasi qidiruvga tayyor)
           // Diagnostics: what Telegram thinks about our webhook (no secrets in the output)
           let statusMemo: { at: number; body: any } | null = null;
           app.get('/api/telegram-status', async (_req: any, res: any) => {
-            let events: any[] = [];
-            if (sql) {
-              try {
-                const rows = await sql`SELECT value FROM app_settings WHERE key = 'telegram_events'`;
-                events = JSON.parse(rows[0]?.value || '[]');
-              } catch { /* no events yet */ }
-            }
-            if (statusMemo && Date.now() - statusMemo.at < 15000) return res.json({ ...statusMemo.body, events });
+            const [events, gemini] = await Promise.all([readEvents('telegram_events'), readEvents('gemini_events')]);
+            if (statusMemo && Date.now() - statusMemo.at < 15000) return res.json({ ...statusMemo.body, events, gemini });
             try {
               const [me, info] = await Promise.all([bot.telegram.getMe(), bot.telegram.getWebhookInfo()]);
               const body = {
@@ -456,7 +434,7 @@ Bilimlar bazasi: ${res.knowledge} bo'lim (${res.embedded} tasi qidiruvga tayyor)
                 lastErrorMessage: info.last_error_message || null
               };
               statusMemo = { at: Date.now(), body };
-              res.json({ ...body, events });
+              res.json({ ...body, events, gemini });
             } catch (err) {
               res.status(500).json({ error: describeErr(err) });
             }
