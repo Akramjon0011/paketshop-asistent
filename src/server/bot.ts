@@ -343,7 +343,11 @@ export function setupBot(app: any) {
           
           // Don't pass res to handleUpdate — forces Telegraf to use standard API
           // method for replies, which is more reliable in serverless environments
+          const webhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET;
           app.post(webhookPath, async (req: any, res: any) => {
+            if (webhookSecret && req.headers['x-telegram-bot-api-secret-token'] !== webhookSecret) {
+              return res.status(401).json({ ok: false });
+            }
             const updateId = req.body?.update_id || 'unknown';
             console.log(`📨 Webhook received update #${updateId}`);
             try {
@@ -358,19 +362,21 @@ export function setupBot(app: any) {
           // Only call setWebhook if the URL changed (avoid Telegram rate limit on every cold start)
           (async () => {
             try {
+              const hookOpts = webhookSecret ? { secret_token: webhookSecret } : undefined;
               if (!sql) {
-                await bot.telegram.setWebhook(webhookUrl);
+                await bot.telegram.setWebhook(webhookUrl, hookOpts);
                 console.log("✅ Webhook set (no DB cache):", webhookUrl);
                 return;
               }
               const cached = await sql`SELECT value FROM app_settings WHERE key = 'telegram_webhook_url'`;
-              if (cached.length > 0 && cached[0].value === webhookUrl) {
+              const cacheKey = webhookUrl + (webhookSecret ? '#s' : '');
+              if (cached.length > 0 && cached[0].value === cacheKey) {
                 return; // already set, skip API call
               }
-              await bot.telegram.setWebhook(webhookUrl);
+              await bot.telegram.setWebhook(webhookUrl, hookOpts);
               await sql`
                 INSERT INTO app_settings (key, value, updated_at)
-                VALUES ('telegram_webhook_url', ${webhookUrl}, CURRENT_TIMESTAMP)
+                VALUES ('telegram_webhook_url', ${cacheKey}, CURRENT_TIMESTAMP)
                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
               `;
               console.log("✅ Vercel Webhook updated to", webhookUrl);

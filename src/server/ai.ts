@@ -215,6 +215,9 @@ export async function dbCreateOrder(
     const enrichedItems = [];
     
     for (const item of items) {
+      if (!Number.isInteger(item.quantity) || item.quantity < 1) {
+        return { error: "Miqdor noto'g'ri" };
+      }
       const prodRes = await sql`SELECT id, name, price, stock FROM products WHERE id = ${item.product_id}`;
       if (prodRes.length === 0) {
         return { error: `Mahsulot topilmadi (ID: ${item.product_id})` };
@@ -234,15 +237,24 @@ export async function dbCreateOrder(
       });
     }
 
+    // Reserve stock atomically: the UPDATE only succeeds if enough stock remains
+    const reserved: Array<{ product_id: number; quantity: number }> = [];
+    for (const item of items) {
+      const upd = await sql`UPDATE products SET stock = stock - ${item.quantity} WHERE id = ${item.product_id} AND stock >= ${item.quantity} RETURNING id`;
+      if (upd.length === 0) {
+        for (const r of reserved) {
+          await sql`UPDATE products SET stock = stock + ${r.quantity} WHERE id = ${r.product_id}`;
+        }
+        return { error: "Omborda yetarli mahsulot qolmadi. Iltimos qayta urinib ko'ring." };
+      }
+      reserved.push(item);
+    }
+
     const orderRes = await sql`
       INSERT INTO orders (customer_name, customer_phone, delivery_address, items, total_price)
       VALUES (${customer_name}, ${customer_phone}, ${delivery_address}, ${JSON.stringify(enrichedItems)}, ${totalPrice})
       RETURNING id, total_price
     `;
-
-    for (const item of items) {
-      await sql`UPDATE products SET stock = stock - ${item.quantity} WHERE id = ${item.product_id}`;
-    }
 
     // CRM Upsert to keep user details saved for future orders
     try {

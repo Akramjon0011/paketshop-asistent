@@ -99,6 +99,24 @@ const apiLimiter = rateLimit({
 
 router.use(apiLimiter);
 
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: "Juda ko'p urinish. 15 daqiqadan so'ng qayta urinib ko'ring." }
+});
+
+const aiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  message: { error: "Juda tez yozyapsiz. Bir daqiqadan so'ng qayta urinib ko'ring." }
+});
+
+const orderLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  message: { error: "Juda ko'p buyurtma yuborildi. Keyinroq urinib ko'ring." }
+});
+
 const JWT_SECRET = process.env.JWT_SECRET || process.env.ADMIN_PASSWORD;
 if (!process.env.JWT_SECRET) {
   console.warn("⚠️  JWT_SECRET env o'rnatilmagan. ADMIN_PASSWORD ishlatilyapti (xavfsiz emas). .env ga JWT_SECRET qo'shing.");
@@ -119,7 +137,7 @@ const requireAdmin = (req: express.Request, res: express.Response, next: express
   }
 };
 
-router.post("/admin/login", (req, res) => {
+router.post("/admin/login", loginLimiter, (req, res) => {
   const { password } = req.body;
   if (password === process.env.ADMIN_PASSWORD) {
     const token = jwt.sign({ role: 'admin' }, JWT_SECRET as string, { expiresIn: '24h' });
@@ -129,7 +147,7 @@ router.post("/admin/login", (req, res) => {
   }
 });
 
-router.get("/knowledge", async (req, res) => {
+router.get("/knowledge", requireAdmin, async (req, res) => {
   if (!sql) return res.status(500).json({ error: "Database not connected" });
   try {
     const data = await sql`SELECT * FROM knowledge_base ORDER BY created_at DESC`;
@@ -340,7 +358,7 @@ router.post("/knowledge/upload", requireAdmin, uploadMemory.single('file'), asyn
 });
 
 // RAG Search endpoint for web chat
-router.post("/knowledge/search", async (req, res) => {
+router.post("/knowledge/search", aiLimiter, async (req, res) => {
   const { query } = req.body;
   if (!query) return res.status(400).json({ error: "Query is required" });
   try {
@@ -390,11 +408,22 @@ router.get("/customers/session/:webSessionId", async (req, res) => {
 });
 
 // Public: POST create order directly from checkout form
-router.post("/orders", async (req, res) => {
+router.post("/orders", orderLimiter, async (req, res) => {
   if (!sql) return res.status(500).json({ error: "Database not connected" });
   const { customer_name, customer_phone, delivery_address, items, webSessionId } = req.body;
   if (!customer_name || !customer_phone || !delivery_address || !items || !Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: "Barcha maydonlar to'ldirilishi shart va mahsulotlar ro'yxati kamida bitta elementdan iborat bo'lishi kerak" });
+  }
+  const validItems = items.every((i: any) =>
+    Number.isInteger(Number(i?.product_id)) && Number.isInteger(Number(i?.quantity)) &&
+    Number(i.quantity) >= 1 && Number(i.quantity) <= 100
+  );
+  if (!validItems) return res.status(400).json({ error: "Mahsulot yoki miqdor noto'g'ri" });
+  if (String(customer_phone).replace(/\D/g, '').length < 9 || String(customer_phone).length > 20) {
+    return res.status(400).json({ error: "Telefon raqami noto'g'ri" });
+  }
+  if (String(customer_name).length > 100 || String(delivery_address).length > 300) {
+    return res.status(400).json({ error: "Ism yoki manzil juda uzun" });
   }
   try {
     const result = await dbCreateOrder(
@@ -424,7 +453,7 @@ router.post("/orders", async (req, res) => {
 // --- Conversational Commerce Routes ---
 
 // 1. Chat with Malika (Conversational E-Commerce)
-router.post("/chat", async (req, res) => {
+router.post("/chat", aiLimiter, async (req, res) => {
   const { message, history, webSessionId } = req.body;
   if (!message) return res.status(400).json({ error: "Xabar majburiy" });
   try {
@@ -437,7 +466,7 @@ router.post("/chat", async (req, res) => {
 });
 
 // 1.2. Streaming chat (SSE) — text appears progressively
-router.post("/chat/stream", async (req, res) => {
+router.post("/chat/stream", aiLimiter, async (req, res) => {
   const { message, history, webSessionId } = req.body;
   if (!message) {
     res.status(400).json({ error: "Xabar majburiy" });
@@ -485,7 +514,7 @@ router.post("/chat/reset", async (req, res) => {
 });
 
 // 1.5. Voice Chat with Malika
-router.post("/chat/voice", uploadMemory.single('audio'), async (req, res) => {
+router.post("/chat/voice", aiLimiter, uploadMemory.single('audio'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "Audio fayl yuborilmadi" });
   }

@@ -161,7 +161,9 @@ export default function Admin() {
     setError('');
     try {
       if (activeTab === 'knowledge') {
-        const res = await fetch('/api/knowledge');
+        const res = await fetch('/api/knowledge', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
         if (res.ok) {
           const data = await res.json();
           setKnowledgeBase(data);
