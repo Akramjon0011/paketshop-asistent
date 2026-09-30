@@ -1,5 +1,6 @@
 import express from 'express';
 import multer from 'multer';
+import { v2 as cloudinary } from 'cloudinary';
 import { sql } from './db.js';
 import { generateEmbedding, searchKnowledgeBase, handleConversationalChat, handleConversationalChatStream, transcribeAudio, generateSpeech, dbCreateOrder, BRAND, BRAND_GREETING, appendHistory } from './ai.js';
 import { GoogleGenAI } from "@google/genai";
@@ -13,6 +14,14 @@ const CLOUDINARY_CONFIGURED = !!(
   process.env.CLOUDINARY_API_KEY &&
   process.env.CLOUDINARY_API_SECRET
 );
+
+if (CLOUDINARY_CONFIGURED) {
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET
+  });
+}
 
 async function uploadToCloudinary(buffer: Buffer, folder: string): Promise<string> {
   return new Promise<string>((resolve, reject) => {
@@ -155,15 +164,6 @@ router.get("/knowledge", requireAdmin, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
-});
-
-import { v2 as cloudinary } from 'cloudinary';
-
-// Configure Cloudinary
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
 const uploadImageMemory = multer({ 

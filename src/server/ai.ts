@@ -38,6 +38,30 @@ export async function generateContentResilient(params: Parameters<typeof ai.mode
   throw lastErr;
 }
 
+// generateContentStream with retry on primary, fallback to fallback model
+export async function generateContentStreamResilient(params: Parameters<typeof ai.models.generateContentStream>[0]) {
+  const models = [params.model, CHAT_FALLBACK_MODEL].filter((m, i, arr) => m && arr.indexOf(m) === i);
+  let lastErr: any;
+  for (const model of models) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await ai.models.generateContentStream({ ...params, model });
+      } catch (err) {
+        lastErr = err;
+        if (Number((err as any)?.status) === 400 && /think/i.test(String((err as any)?.message)) && params.config?.thinkingConfig) {
+          params = { ...params, config: { ...params.config, thinkingConfig: undefined } };
+          attempt--;
+          continue;
+        }
+        if (!isTransientGeminiError(err)) throw err;
+        console.warn(`Gemini stream ${model} transient error (attempt ${attempt + 1}):`, (err as any)?.status ?? '', String((err as any)?.message || err).slice(0, 120));
+        if (attempt === 0) await new Promise(r => setTimeout(r, 700));
+      }
+    }
+  }
+  throw lastErr;
+}
+
 export const BRAND = {
   shopName: process.env.SHOP_NAME || "Paketshop.uz",
   assistantName: process.env.ASSISTANT_NAME || "Malika",
@@ -486,13 +510,32 @@ export async function generateEmbedding(text: string): Promise<number[] | null> 
   }
 }
 
+// Quick check for greetings or acknowledgments where vector embedding is unnecessary
+const SKIP_EMBEDDING_REGEX = /^(salom|assalomu?\s*alaykum|qalaysiz|qale|privet|privyet|hello|hi|hey|ha|xa|yo'q|yoq|ok|mayli|xop|xo'p|rahmat|raxmat|yaxshi|tushundim|yo|net|da|thanks|spasibo)[!.?\s]*$/i;
+
 // RAG: Find top N most relevant knowledge base entries for a query using Hybrid Search
 export async function searchKnowledgeBase(query: string, topN: number = 3): Promise<string> {
   if (!sql) return "";
+  const trimmed = query.trim();
+  if (!trimmed || trimmed.length < 3 || SKIP_EMBEDDING_REGEX.test(trimmed)) {
+    return ""; // Skip embedding API call and table scan on common greetings & affirmations
+  }
+
   try {
-    // 1. Semantic vector search
+    // Run keyword search and embedding generation in parallel
+    const [embedding, keywordData] = await Promise.all([
+      generateEmbedding(trimmed),
+      sql`
+        SELECT id, question, answer, image_url, video_url,
+               0.9::double precision as similarity
+        FROM knowledge_base
+        WHERE question ILIKE ${'%' + trimmed + '%'}
+           OR answer ILIKE ${'%' + trimmed + '%'}
+        LIMIT ${topN}
+      `.catch(e => { console.warn("RAG keyword search err:", e); return []; })
+    ]);
+
     let vectorData: any[] = [];
-    const embedding = await generateEmbedding(query);
     if (embedding) {
       const vectorStr = `[${embedding.join(',')}]`;
       vectorData = await sql`
@@ -502,28 +545,14 @@ export async function searchKnowledgeBase(query: string, topN: number = 3): Prom
         WHERE embedding IS NOT NULL
         ORDER BY embedding <=> ${vectorStr}::vector
         LIMIT ${topN}
-      `;
+      `.catch(e => { console.warn("RAG vector search err:", e); return []; });
     }
 
-    // 2. Keyword matching search (ILIKE)
-    const keywordData = await sql`
-      SELECT id, question, answer, image_url, video_url,
-             0.9::double precision as similarity
-      FROM knowledge_base
-      WHERE question ILIKE ${'%' + query + '%'}
-         OR answer ILIKE ${'%' + query + '%'}
-      LIMIT ${topN}
-    `;
-
-    // 3. Merge & Deduplicate
+    // Merge & Deduplicate
     const resultMap = new Map<number, any>();
-    
-    // Add keyword results
     for (const item of keywordData) {
       resultMap.set(item.id, { ...item, type: 'keyword' });
     }
-    
-    // Add vector results, maintaining higher score if duplicate
     for (const item of vectorData) {
       if (resultMap.has(item.id)) {
         const existing = resultMap.get(item.id);
@@ -534,13 +563,13 @@ export async function searchKnowledgeBase(query: string, topN: number = 3): Prom
       }
     }
 
-    // Sort and slice
     const mergedResults = Array.from(resultMap.values())
+      .filter(item => item.similarity >= 0.5)
       .sort((a, b) => b.similarity - a.similarity)
       .slice(0, topN);
 
     if (mergedResults.length === 0) {
-      return await getKnowledgeBaseContext();
+      return "";
     }
 
     const contextStr = mergedResults.map((item: any) => {
@@ -553,7 +582,7 @@ export async function searchKnowledgeBase(query: string, topN: number = 3): Prom
     return `\n\nQuyidagi ma'lumotlar sening bilimlar bazangdan topilgan eng mos natijalar. Shu ma'lumotlarga asoslanib mijozlarga aniq javob ber. Agar mijozga biror ma'lumotni berayotgan bo'lsang va uning [IMAGE: ...] yoki [VIDEO: ...] yozuvi bo'lsa, albatta shu yozuvlarni javobingning oxiriga o'zgarishsiz qo'shib yubor (faqat borini):\n${contextStr}`;
   } catch (err) {
     console.error("RAG search error:", err);
-    return await getKnowledgeBaseContext();
+    return "";
   }
 }
 
@@ -681,83 +710,86 @@ export async function generateSpeech(text: string): Promise<string | null> {
   }
 }
 
-// Conversational Chat Handler with Function Calling Loop and CRM Context Injection
-export async function handleConversationalChat(
-  message: string,
-  history: Array<{ role: 'user' | 'model'; content: string }>,
+async function loadCustomerContext(
   userContext?: { telegramId?: number; webSessionId?: string }
 ): Promise<string> {
-  // Prefer persisted history if user context is provided (overrides stale client history)
-  let summaryContext = "";
-  if (userContext && (userContext.telegramId || userContext.webSessionId)) {
-    const [persisted, summary] = await Promise.all([
-      loadHistory(userContext),
-      loadSummary(userContext),
-    ]);
-    if (persisted.length > 0) history = persisted;
-    if (summary) {
-      summaryContext = `\n\nSUHBATNING AVVALGI QISMI XULOSASI (eslab qoling, lekin to'g'ridan-to'g'ri takrorlamang):\n${summary}`;
-    }
-  }
+  if (!sql || !userContext) return "";
+  const { telegramId, webSessionId } = userContext;
+  if (!telegramId && !webSessionId) return "";
 
-  const ragContext = await searchKnowledgeBase(message, 2);
-  
-  let customerContext = "";
-  if (sql && userContext) {
-    const { telegramId, webSessionId } = userContext;
-    try {
-      let customerRes: any[] = [];
-      if (telegramId) {
-        customerRes = await sql`SELECT name, phone, address FROM customers WHERE telegram_id = ${telegramId}`;
-      } else if (webSessionId) {
-        customerRes = await sql`SELECT name, phone, address FROM customers WHERE web_session_id = ${webSessionId}`;
+  try {
+    const customerRes = telegramId
+      ? await sql`SELECT name, phone, address FROM customers WHERE telegram_id = ${telegramId} LIMIT 1`
+      : await sql`SELECT name, phone, address FROM customers WHERE web_session_id = ${webSessionId} LIMIT 1`;
+
+    if (!customerRes || customerRes.length === 0) return "";
+    const cust = customerRes[0];
+
+    // Fetch last 5 past orders for this customer (non-cancelled)
+    let pastOrders: any[] = [];
+    if (cust.phone) {
+      try {
+        pastOrders = await sql`
+          SELECT items, total_price, created_at FROM orders 
+          WHERE customer_phone = ${cust.phone} AND status != 'cancelled'
+          ORDER BY created_at DESC LIMIT 5
+        `;
+      } catch (orderHistoryErr) {
+        console.error("Failed to fetch customer order history:", orderHistoryErr);
       }
+    }
 
-      if (customerRes && customerRes.length > 0) {
-        const cust = customerRes[0];
-
-        // Fetch last 5 past orders for this customer (non-cancelled)
-        let pastOrders: any[] = [];
-        if (cust.phone) {
-          try {
-            pastOrders = await sql`
-              SELECT items, total_price, created_at FROM orders 
-              WHERE customer_phone = ${cust.phone} AND status != 'cancelled'
-              ORDER BY created_at DESC LIMIT 5
-            `;
-          } catch (orderHistoryErr) {
-            console.error("Failed to fetch customer order history:", orderHistoryErr);
-          }
+    let ordersHistoryText = "";
+    if (pastOrders && pastOrders.length > 0) {
+      ordersHistoryText = "\nMijozning oldingi muvaffaqiyatli xaridlari tarixi:\n" + pastOrders.map(o => {
+        let itemsDesc = "";
+        try {
+          const parsedItems = typeof o.items === 'string' ? JSON.parse(o.items) : o.items;
+          itemsDesc = Array.isArray(parsedItems) 
+            ? parsedItems.map((i: any) => `${i.name} (${i.quantity} dona)`).join(", ")
+            : "mahsulotlar";
+        } catch {
+          itemsDesc = "mahsulotlar";
         }
+        const orderDate = o.created_at instanceof Date ? o.created_at.toLocaleDateString() : String(o.created_at);
+        return `- ${itemsDesc}, Jami summa: ${o.total_price} so'm, Sana: ${orderDate}`;
+      }).join("\n");
+    }
 
-        let ordersHistoryText = "";
-        if (pastOrders && pastOrders.length > 0) {
-          ordersHistoryText = "\nMijozning oldingi muvaffaqiyatli xaridlari tarixi:\n" + pastOrders.map(o => {
-            let itemsDesc = "";
-            try {
-              const parsedItems = typeof o.items === 'string' ? JSON.parse(o.items) : o.items;
-              itemsDesc = Array.isArray(parsedItems) 
-                ? parsedItems.map((i: any) => `${i.name} (${i.quantity} dona)`).join(", ")
-                : "mahsulotlar";
-            } catch (e) {
-              itemsDesc = "mahsulotlar";
-            }
-            const orderDate = o.created_at instanceof Date ? o.created_at.toLocaleDateString() : String(o.created_at);
-            return `- ${itemsDesc}, Jami summa: ${o.total_price} so'm, Sana: ${orderDate}`;
-          }).join("\n");
-        }
-
-        customerContext = `\n\nMIJOZ CRM MA'LUMOTLARI (SHAXSIY YONDASHUV):
+    return `\n\nMIJOZ CRM MA'LUMOTLARI (SHAXSIY YONDASHUV):
 Ismi: ${cust.name || 'Noma\'lum'}
 Telefon: ${cust.phone || 'Noma\'lum'}
 Manzil: ${cust.address || 'Noma\'lum'}
 Qoida: Mijozni samimiy tarzda ismi bilan chaqirib salomlashing. Agar mijoz buyurtma berishni istasa, undan yana ismi, telefon raqami yoki manzilini SO'RAMANG! Shunchaki: "Bizda sizning ma'lumotlaringiz saqlangan: Ism: ${cust.name}, Telefon: ${cust.phone}, Manzil: ${cust.address}. Buyurtmani shu ma'lumotlar bilan tasdiqlaymizmi?" deb so'rang. Agar rozilik bersa, darhol "create_order" funksiyasini chaqiring.${ordersHistoryText ? `\n${ordersHistoryText}\nTavsiya etish qoidasi: Mijozning yuqoridagi xaridlar tarixiga asoslanib, unga mos kelishi mumkin bo'lgan boshqa tovarlarni suhbat davomida tabiiy ravishda tavsiya eting.` : ''}`;
-        console.log("Successfully injected CRM context and order history for returning customer:", cust.name);
-      }
-    } catch (crmFetchErr) {
-      console.error("Failed to fetch CRM user context in handleConversationalChat:", crmFetchErr);
-    }
+  } catch (crmFetchErr) {
+    console.error("Failed to fetch CRM user context in loadCustomerContext:", crmFetchErr);
+    return "";
   }
+}
+
+// Conversational Chat Handler with Function Calling Loop, Parallel Pre-fetch, and Native Streaming
+export async function handleConversationalChat(
+  message: string,
+  history: Array<{ role: 'user' | 'model'; content: string }>,
+  userContext?: { telegramId?: number; webSessionId?: string },
+  onChunk?: (text: string) => void
+): Promise<string> {
+  const hasUserContext = !!(userContext && (userContext.telegramId || userContext.webSessionId));
+
+  // Run all context preparation concurrently in parallel
+  const [historyResult, ragContext, customerContext] = await Promise.all([
+    hasUserContext
+      ? Promise.all([loadHistory(userContext!), loadSummary(userContext!)])
+      : Promise.resolve<[Array<{ role: 'user' | 'model'; content: string }>, string]>([[], ""]),
+    searchKnowledgeBase(message, 2),
+    loadCustomerContext(userContext)
+  ]);
+
+  const [persistedHistory, summary] = historyResult;
+  if (persistedHistory.length > 0) history = persistedHistory;
+  const summaryContext = summary
+    ? `\n\nSUHBATNING AVVALGI QISMI XULOSASI (eslab qoling, lekin to'g'ridan-to'g'ri takrorlamang):\n${summary}`
+    : "";
 
   const fullSystemInstruction = `${SYSTEM_INSTRUCTION}\n\n${ragContext}${customerContext}${summaryContext}`;
 
@@ -787,13 +819,60 @@ Qoida: Mijozni samimiy tarzda ismi bilan chaqirib salomlashing. Agar mijoz buyur
     let loopCount = 0;
     while (loopCount < 5) {
       loopCount++;
+
+      // When tools have already executed (loopCount > 1) and streaming is requested, stream final answer directly!
+      if (loopCount > 1 && onChunk) {
+        let streamText = "";
+        try {
+          const stream = await generateContentStreamResilient({
+            model: CHAT_MODEL,
+            contents: contents,
+            config: {
+              systemInstruction: fullSystemInstruction,
+              temperature: 0.7,
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            }
+          });
+
+          for await (const chunk of stream) {
+            const chunkText = chunk.text;
+            if (chunkText) {
+              onChunk(chunkText);
+              streamText += chunkText;
+            }
+          }
+        } catch (streamErr) {
+          console.warn("generateContentStream error, falling back to non-streaming:", streamErr);
+          const fallbackRes = await generateContentResilient({
+            model: CHAT_MODEL,
+            contents: contents,
+            config: {
+              systemInstruction: fullSystemInstruction,
+              temperature: 0.7,
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            }
+          });
+          const parts = fallbackRes.candidates?.[0]?.content?.parts || [];
+          streamText = parts.filter(p => p.text && !p.thought).map(p => p.text).join('').trim();
+          if (streamText) onChunk(streamText);
+        }
+
+        const responseText = streamText || "Kechirasiz, men buni tushunmadim.";
+        if (userContext) {
+          await appendHistory(userContext, 'user', message);
+          await appendHistory(userContext, 'model', responseText);
+        }
+        return responseText;
+      }
+
+      // First turn: determine if tools need to be called
       const response = await generateContentResilient({
         model: CHAT_MODEL,
         contents: contents,
         config: {
           systemInstruction: fullSystemInstruction,
           temperature: 0.7,
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }, // chat replies don't need deep reasoning; keeps latency down
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           tools: tools
         }
       });
@@ -851,9 +930,13 @@ Qoida: Mijozni samimiy tarzda ismi bilan chaqirib salomlashing. Agar mijoz buyur
         continue;
       }
 
-      // Gemini 3 can split the answer across several parts (and add thought parts) — join the visible text
+      // No function call: direct response ready
       const visibleText = parts.filter(p => p.text && !p.thought).map(p => p.text).join('').trim();
-      let responseText = visibleText || "Kechirasiz, men buni tushunmadim.";
+      const responseText = visibleText || "Kechirasiz, men buni tushunmadim.";
+
+      if (onChunk && responseText) {
+        onChunk(responseText);
+      }
 
       if (userContext) {
         await appendHistory(userContext, 'user', message);
@@ -869,34 +952,14 @@ Qoida: Mijozni samimiy tarzda ismi bilan chaqirib salomlashing. Agar mijoz buyur
   }
 }
 
-// Streaming version: runs same tool-loop, but emits the final text chunk-by-chunk via callback.
+// Streaming version: runs tool loop and streams text chunk-by-chunk in real-time
 export async function handleConversationalChatStream(
   message: string,
   history: Array<{ role: 'user' | 'model'; content: string }>,
   userContext: { telegramId?: number; webSessionId?: string } | undefined,
   onChunk: (text: string) => void
 ): Promise<string> {
-  const fullText = await handleConversationalChat(message, history, userContext);
-
-  // Tokenize into small chunks (3-4 words) for a streaming feel without changing the tool loop
-  const tokens = fullText.split(/(\s+)/);
-  let buf = '';
-  let wordCount = 0;
-  for (const t of tokens) {
-    buf += t;
-    if (/\s/.test(t)) {
-      wordCount++;
-      if (wordCount >= 2) {
-        onChunk(buf);
-        buf = '';
-        wordCount = 0;
-        await new Promise(r => setTimeout(r, 30));
-      }
-    }
-  }
-  if (buf) onChunk(buf);
-
-  return fullText;
+  return await handleConversationalChat(message, history, userContext, onChunk);
 }
 
 // Transcribe raw audio to text.
