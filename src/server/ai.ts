@@ -1,6 +1,6 @@
 import { GoogleGenAI, Modality, ThinkingLevel } from "@google/genai";
 import { sql, initDb, type Sql } from './db.js';
-import { listProducts, searchProducts, getProduct, calculateQuote, createRequest } from './catalog.js';
+import { listProducts, searchProducts, getProduct, calculateQuote, createRequest, queryTokens } from './catalog.js';
 import { SHOP, shopStatusLine } from './shopInfo.js';
 import { recordEvent } from './events.js';
 import { allowNumbersFromText, collectNumbers, findUnverifiedNumbers, formatAmount } from './numberGuard.js';
@@ -9,8 +9,11 @@ const geminiKey = process.env.GEMINI_API_KEY;
 export const ai = new GoogleGenAI({ apiKey: geminiKey as string });
 
 export const CHAT_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
-// Used when the primary model keeps answering 503/429 (high demand spikes)
-export const CHAT_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.5-flash-lite';
+// Tried in order when the primary model answers 503/429 or stalls. Quotas are per model, so several models multiply capacity.
+export const CHAT_FALLBACK_MODELS = (process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.5-flash-lite,gemini-3.5-flash,gemini-3.1-flash-lite')
+  .split(',').map(m => m.trim()).filter(Boolean);
+// Overall time budget for trying models on one call (each stalled attempt already costs GEMINI_CALL_TIMEOUT_MS)
+const GEMINI_TOTAL_BUDGET_MS = 35000;
 
 // A Gemini call that hangs (seen: 77s and >300s stalls) is cut off and retried on the fallback model instead
 const GEMINI_CALL_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS) || 15000;
@@ -43,9 +46,11 @@ const noteGeminiProblem = (kind: string, model: string, err: unknown) =>
 
 // generateContent with one quick retry on the primary model, then one attempt (plus retry) on the fallback model
 export async function generateContentResilient(params: Parameters<typeof ai.models.generateContent>[0]) {
-  const models = availableModels([params.model, CHAT_FALLBACK_MODEL]);
+  const models = availableModels([params.model, ...CHAT_FALLBACK_MODELS]);
+  const deadline = Date.now() + GEMINI_TOTAL_BUDGET_MS;
   let lastErr: any;
   for (const model of models) {
+    if (lastErr && Date.now() > deadline) break;   // out of time budget: don't keep the customer waiting
     for (let attempt = 0; attempt < 2; attempt++) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), GEMINI_CALL_TIMEOUT_MS);
@@ -78,9 +83,11 @@ export async function generateContentResilient(params: Parameters<typeof ai.mode
 
 // generateContentStream with retry on primary, fallback to fallback model
 export async function generateContentStreamResilient(params: Parameters<typeof ai.models.generateContentStream>[0]) {
-  const models = availableModels([params.model, CHAT_FALLBACK_MODEL]);
+  const models = availableModels([params.model, ...CHAT_FALLBACK_MODELS]);
+  const deadline = Date.now() + GEMINI_TOTAL_BUDGET_MS;
   let lastErr: any;
   for (const model of models) {
+    if (lastErr && Date.now() > deadline) break;
     for (let attempt = 0; attempt < 2; attempt++) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), GEMINI_CALL_TIMEOUT_MS); // cleared as soon as the stream has started
@@ -748,6 +755,24 @@ Qoida: Mijozni ismi bilan hurmat bilan chaqir. So'rov yuborishda ism, telefon va
 }
 
 
+// Looks the customer's words up in the catalog before the model even starts, so most product questions are answered
+// in ONE model call instead of two (fewer requests against the quota, faster). Tools stay available for anything else.
+async function prefetchCatalog(message: string): Promise<string> {
+  const trimmed = message.trim();
+  if (!sql || trimmed.length < 3 || trimmed.length > 300 || SKIP_EMBEDDING_REGEX.test(trimmed)) return '';
+  const tokens = queryTokens(trimmed);
+  if (!tokens.length) return '';
+  try {
+    await initDb();
+    const found: any = await searchProducts(sql, trimmed, { minScore: Math.min(2, tokens.length), limit: 5, nameOnly: true });
+    if (!found.products?.length) return '';
+    return `\n\nKATALOGDAN AVTOMATIK TOPILGAN MAHSULOTLAR (mijoz xabariga ehtimoliy mos; boshqa ma'lumot yoki hisob kerak bo'lsa funksiyalarni chaqir):\n${JSON.stringify(found.products)}`;
+  } catch (err) {
+    console.warn("Catalog prefetch failed:", err);
+    return '';
+  }
+}
+
 // Conversational Chat Handler with Function Calling Loop, Parallel Pre-fetch, and Native Streaming
 // A photo the customer sent (e.g. a sample cup: "do you have this?")
 export type ImageAttachment = { data: string; mimeType: string };
@@ -762,12 +787,13 @@ export async function handleConversationalChat(
   const hasUserContext = !!(userContext && (userContext.telegramId || userContext.webSessionId));
 
   // Run all context preparation concurrently in parallel
-  const [historyResult, ragContext, customerContext] = await Promise.all([
+  const [historyResult, ragContext, customerContext, catalogContext] = await Promise.all([
     hasUserContext
       ? Promise.all([loadHistory(userContext!), loadSummary(userContext!)])
       : Promise.resolve<[Array<{ role: 'user' | 'model'; content: string }>, string]>([[], ""]),
     searchKnowledgeBase(message, 2),
-    loadCustomerContext(userContext)
+    loadCustomerContext(userContext),
+    images?.length ? Promise.resolve('') : prefetchCatalog(message)   // a photo's generic caption says nothing about the product
   ]);
 
   const [persistedHistory, summary] = historyResult;
@@ -776,7 +802,7 @@ export async function handleConversationalChat(
     ? `\n\nSUHBATNING AVVALGI QISMI XULOSASI (eslab qoling, lekin to'g'ridan-to'g'ri takrorlamang):\n${summary}`
     : "";
 
-  const fullSystemInstruction = `${buildSystemInstruction()}\n\n${ragContext}${customerContext}${summaryContext}`;
+  const fullSystemInstruction = `${buildSystemInstruction()}\n\n${ragContext}${catalogContext}${customerContext}${summaryContext}`;
 
   const contents: any[] = [];
   for (const turn of history) {
@@ -805,7 +831,7 @@ export async function handleConversationalChat(
 
   // Amounts in the answer must come from what the model was given; otherwise it gets one chance to fix them.
   const allowedNumbers = new Set<number>();
-  allowNumbersFromText(`${message}\n${history.map(h => h.content).join('\n')}\n${ragContext}\n${customerContext}\n${summaryContext}\n${SHOP.phone.replace(/\s/g, '')}`, allowedNumbers);
+  allowNumbersFromText(`${message}\n${history.map(h => h.content).join('\n')}\n${ragContext}\n${catalogContext}\n${customerContext}\n${summaryContext}\n${SHOP.phone.replace(/\s/g, '')}`, allowedNumbers);
   let corrections = 1;
   let correctionPending = false;
   let streamedAlready = false;   // text already sent to the client through onChunk (the final reply then replaces it)

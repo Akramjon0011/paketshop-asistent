@@ -74,13 +74,22 @@ function stem(token: string): string {
   return t.length >= 2 ? t : token;
 }
 
+// Question words that say nothing about the product (they'd match descriptions by accident)
+const STOPWORDS = new Set([
+  'qancha', 'narxi', 'narx', 'narxini', 'turadi', 'bormi', 'bor', 'kerak', 'mavjud', 'nima', 'qanday', 'menga', 'sizda', 'sizlarda',
+  'uchun', 'yoki', 'bilan', 'ham', 'hozir', 'qaysi', 'iltimos', 'olsam', 'ayting', 'aytib', 'berasizlarmi', 'berasizmi', 'salom',
+  'сколько', 'стоит', 'цена', 'цену', 'есть', 'нужно', 'нужны', 'нужен', 'какие', 'можно', 'здравствуйте', 'пожалуйста', 'для',
+  'price', 'how', 'much', 'have', 'you', 'the', 'for', 'what', 'need', 'please', 'hello', 'with',
+]);
+
 export function queryTokens(query: string): string[] {
   const q = query
     .toLowerCase()
     .replace(/[‘’ʻʼ`´]/g, "'")
     .replace(/(?<=\d)\s*[х×*]\s*(?=\d)/g, 'x')   // 20х30, 20×30, 20*30 -> 20x30
     .replace(/(?<=\d)\s+x\s+(?=\d)/g, 'x');       // 20 x 30 -> 20x30
-  return [...new Set(q.split(/[^\p{L}\p{N}'x.,]+/u).map(t => t.replace(/^[.,']+|[.,']+$/g, '')).filter(t => t.length >= 2).map(stem))].slice(0, 8);
+  const words = q.split(/[^\p{L}\p{N}'x.,]+/u).map(t => t.replace(/^[.,']+|[.,']+$/g, '')).filter(t => t.length >= 2 && !STOPWORDS.has(t));
+  return [...new Set(words.map(stem))].slice(0, 8);
 }
 
 export async function listProducts(db: Sql, category?: string) {
@@ -100,18 +109,23 @@ export async function listProducts(db: Sql, category?: string) {
   };
 }
 
-export async function searchProducts(db: Sql, query: string) {
+// minScore = how many of the query words a product must match (the auto-lookup before each answer asks for 2).
+// nameOnly = ignore the long descriptions (they mention "delivery", "price"... and would match unrelated questions).
+export async function searchProducts(db: Sql, query: string, opts: { minScore?: number; limit?: number; nameOnly?: boolean } = {}) {
   const tokens = queryTokens(query);
   if (tokens.length === 0) return listProducts(db);
+  const minScore = Math.max(1, opts.minScore ?? 1);
+  const limit = Math.min(20, Math.max(1, opts.limit ?? 8));
+  const nameOnly = !!opts.nameOnly;
   const patterns = tokens.map(t => `%${escapeLike(t)}%`);
   const rows = await db`
     SELECT * FROM (
       SELECT id, sku, name, name_ru, category, price, price_on_request, pack_unit, pack_qty, unit_price, stock_note,
         (SELECT COUNT(*) FROM unnest(${patterns}::text[]) AS p
           WHERE (coalesce(sku, '') || ' ' || name || ' ' || coalesce(name_ru, '') || ' ' || coalesce(category, '') || ' ' || coalesce(category_ru, '')
-                 || ' ' || coalesce(description, '') || ' ' || coalesce(description_ru, '')) ILIKE p) AS score
+                 || ' ' || (CASE WHEN ${nameOnly}::boolean THEN '' ELSE coalesce(description, '') || ' ' || coalesce(description_ru, '') END)) ILIKE p) AS score
       FROM products WHERE active
-    ) t WHERE score > 0 ORDER BY score DESC, id LIMIT 8`;
+    ) t WHERE score >= ${minScore} ORDER BY score DESC, id LIMIT ${limit}`;
   if (rows.length === 0) return { success: true, products: [], message: "No product in the catalog matched this query" };
   return { success: true, products: rows.map(compact) };
 }
