@@ -233,7 +233,7 @@ const MAX_ENTRY = 1500;
 
 // Buttons, form labels and step numbers that carry no information for a customer (uz + ru)
 const JUNK_LINE = new RegExp([
-  '^\d{2}$', '^←$',
+  '^\\d{2}$', '^←$',
   "^(Telegramda hisoblatish|So'rov yuborish|So'rovni yuborish|Katalogga o'tish|Katalogni ko'rish|Buyurtmani kuzatish|Tashkilotlar bo'limi|Biz bilan bog'lanish|Aloqa sahifasi|Bank orqali to'lov kerak|Shartnoma kerak)$",
   'roziman|соглас',
   '^(Рассчитать в Telegram|Отправить заявку|Отправить запрос|Перейти в каталог|Открыть каталог|Отследить заказ|Организациям|Связаться с нами|Нужна оплата через банк|Нужен договор)$',

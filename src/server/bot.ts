@@ -138,7 +138,7 @@ export function setupBot(app: any) {
   // Managers only: "/sync" previews what would change, "/sync apply" refreshes products and knowledge from paketshop.uz
   bot.command('sync', async (ctx) => {
     if (!adminChatIds().includes(String(ctx.from.id))) return; // stay silent for everyone else
-    const apply = /apply/i.test((ctx.message as any)?.text ?? '');
+    const apply = /\bapply\b/i.test((ctx.message as any)?.text ?? '');
     try {
       if (!sql) { await ctx.reply("Ma'lumotlar bazasi ulanmagan."); return; }
       await initDb();
