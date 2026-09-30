@@ -406,7 +406,7 @@ ${existingSummary ? `Avvalgi xulosa:\n${existingSummary}\n\nYangi suhbat:\n` : '
 Yangilangan xulosa:`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.8-flash',
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
     });
     const newSummary = response.text?.trim() || existingSummary;
@@ -679,7 +679,7 @@ Qoida: Mijozni samimiy tarzda ismi bilan chaqirib salomlashing. Agar mijoz buyur
     while (loopCount < 5) {
       loopCount++;
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.8-flash',
         contents: contents,
         config: {
           systemInstruction: fullSystemInstruction,
@@ -793,7 +793,7 @@ export async function transcribeAudio(audioBuffer: Buffer, mimeType: string): Pr
   try {
     const base64Data = audioBuffer.toString('base64');
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.8-flash',
       contents: [
         {
           role: 'user',

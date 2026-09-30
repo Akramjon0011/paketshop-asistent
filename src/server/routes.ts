@@ -306,7 +306,7 @@ router.post("/knowledge/upload", requireAdmin, uploadMemory.single('file'), asyn
       const base64Data = req.file.buffer.toString('base64');
       
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.8-flash',
         contents: [
           {
             role: 'user',
