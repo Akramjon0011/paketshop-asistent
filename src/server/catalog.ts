@@ -353,9 +353,13 @@ export type SiteData = {
   productSource?: 'api' | 'html';   // where the products were read from (storefront API or page HTML)
 };
 
+type KbEntry = { question: string; answer: string };
+
 export type SyncPlan = {
   site: SiteData;
-  kbEntries: { question: string; answer: string }[];
+  kbEntries: KbEntry[];     // everything the site currently provides as knowledge
+  kbInsert: KbEntry[];      // entries that are new, changed, or stored without a search embedding
+  kbDelete: { id: number; question: string; embedded: boolean }[];   // stored entries that are gone, changed or unsearchable
   newProducts: string[];
   changed: { sku: string; name: string; changes: string[] }[];   // price / stock note / name changes worth telling the manager
   contentChanged: number;   // other fields changed (description, photo, pack sizes, ...)
@@ -363,8 +367,8 @@ export type SyncPlan = {
   deactivate: { id: number; name: string }[];
   firstSync: boolean;
   existingSiteProducts: number;   // active products already imported from the site
-  oldKbEntries: number;
-  kbChanged: boolean;       // the imported knowledge entries differ from what is stored
+  kbChanged: boolean;       // something to insert or delete in the imported knowledge
+  kbMissingEmbeddings: number;   // stored entries that search cannot find yet (the embedding service failed during an earlier sync)
   needsWrite: boolean;      // anything at all to write (products or knowledge)
   problems: string[];       // reasons why applying would be refused
 };
@@ -450,14 +454,26 @@ export async function planCatalogSync(db: Sql, site?: SiteData): Promise<SyncPla
     .filter(r => (firstSync ? !(r.sku && siteSkus.has(r.sku)) : r.source === SOURCE && !(r.sku && siteSkus.has(r.sku))))
     .map(r => ({ id: r.id as number, name: r.name as string }));
 
-  const kbEntries = [
+  const kbEntries: KbEntry[] = [
     ...data.sections.map(s => ({ question: s.question, answer: s.answer })),
     ...catalogOverview(data.products),
   ];
-  const oldKbRows = await db`SELECT question, answer FROM knowledge_base WHERE source = ${SOURCE}`;
-  const kbKey = (e: { question: string; answer: string }) => `${e.question}\u0000${e.answer}`;
-  const oldKbKeys = new Set(oldKbRows.map(r => kbKey(r as any)));
-  const kbChanged = oldKbRows.length !== kbEntries.length || kbEntries.some(e => !oldKbKeys.has(kbKey(e)));
+  // Knowledge is synced as a diff: stored entries with the same text that search can already find stay untouched (and are not
+  // embedded again); only new or changed entries are embedded. Entries stored without an embedding are invisible to search,
+  // so they are replaced too: a sync after an embedding failure repairs them.
+  const oldKbRows = await db`SELECT id, question, answer, (embedding IS NOT NULL) AS embedded FROM knowledge_base WHERE source = ${SOURCE}`;
+  const kbKey = (e: KbEntry) => `${e.question}\u0000${e.answer}`;
+  const wanted = new Set(kbEntries.map(kbKey));
+  const kept = new Set<string>();
+  const kbDelete: SyncPlan['kbDelete'] = [];
+  for (const r of oldKbRows) {
+    const key = kbKey(r as any);
+    if (wanted.has(key) && r.embedded && !kept.has(key)) kept.add(key);
+    else kbDelete.push({ id: r.id as number, question: r.question as string, embedded: !!r.embedded });
+  }
+  const kbInsert = kbEntries.filter(e => !kept.has(kbKey(e)));
+  const kbMissingEmbeddings = oldKbRows.filter(r => !r.embedded).length;
+  const kbChanged = kbInsert.length > 0 || kbDelete.length > 0;
   const existingSiteProducts = existing.filter(r => r.source === SOURCE && r.active !== false).length;
 
   const problems: string[] = [];
@@ -466,8 +482,8 @@ export async function planCatalogSync(db: Sql, site?: SiteData): Promise<SyncPla
   if (data.errors.length > 5) problems.push(`Saytni o'qishda ${data.errors.length} ta xato bo'ldi`);
 
   return {
-    site: data, kbEntries, newProducts, changed, contentChanged, unchanged, deactivate, firstSync, existingSiteProducts,
-    oldKbEntries: oldKbRows.length, kbChanged,
+    site: data, kbEntries, kbInsert, kbDelete, newProducts, changed, contentChanged, unchanged, deactivate, firstSync, existingSiteProducts,
+    kbChanged, kbMissingEmbeddings,
     needsWrite: productsNeedWrite || deactivate.length > 0 || kbChanged,
     problems,
   };
@@ -478,9 +494,25 @@ export type Embedder = (texts: string[]) => Promise<(number[] | null)[]>;
 export async function applyCatalogSync(db: Sql, plan: SyncPlan, embed: Embedder) {
   if (plan.problems.length) throw new Error(`Sinxronlash to'xtatildi: ${plan.problems.join('; ')}`);
 
-  // Embeddings first (network), so the database transaction below stays short. Skipped when the knowledge text is unchanged.
-  const vectors = plan.kbChanged ? await embed(plan.kbEntries.map(e => `${e.question} ${e.answer}`.slice(0, 3000))) : [];
-  const embedded = vectors.filter(Boolean).length;
+  // Embeddings first (network), so the database transaction below stays short. Only new or changed knowledge is embedded.
+  let vectors: (number[] | null)[] = [];
+  if (plan.kbInsert.length) {
+    try {
+      vectors = await embed(plan.kbInsert.map(e => `${e.question} ${e.answer}`.slice(0, 3000)));
+    } catch (embedErr) {
+      console.warn("Embedding failed, knowledge stays as it is:", embedErr);   // products are still synced
+    }
+  }
+  // An entry that could not be embedded is not stored (search could not find it), and the older version of that entry,
+  // which search can find, is kept: a failing embedding service never makes the knowledge base worse.
+  const failedQuestions = new Set<string>();
+  const kbRows: { entry: KbEntry; vector: string }[] = [];
+  plan.kbInsert.forEach((entry, i) => {
+    const v = vectors[i];
+    if (v && v.length) kbRows.push({ entry, vector: `[${v.join(',')}]` });
+    else failedQuestions.add(entry.question);
+  });
+  const kbDeleteIds = plan.kbDelete.filter(r => !(r.embedded && failedQuestions.has(r.question))).map(r => r.id);
 
   const statements: any[] = [];
   for (const p of plan.site.products) {
@@ -508,22 +540,33 @@ export async function applyCatalogSync(db: Sql, plan: SyncPlan, embed: Embedder)
   if (plan.deactivate.length) {
     statements.push(db`UPDATE products SET active = FALSE WHERE id = ANY(${plan.deactivate.map(d => d.id)}::int[])`);
   }
-  if (plan.kbChanged) {
-    statements.push(db`DELETE FROM knowledge_base WHERE source = ${SOURCE}`);
-    plan.kbEntries.forEach((e, i) => {
-      const vec = vectors[i] ? `[${vectors[i]!.join(',')}]` : null;
-      statements.push(db`INSERT INTO knowledge_base (question, answer, embedding, source) VALUES (${e.question}, ${e.answer}, ${vec}::vector, ${SOURCE})`);
-    });
+  if (kbDeleteIds.length) {
+    statements.push(db`DELETE FROM knowledge_base WHERE id = ANY(${kbDeleteIds}::int[]) AND source = ${SOURCE}`);
+  }
+  for (const { entry, vector } of kbRows) {
+    statements.push(db`INSERT INTO knowledge_base (question, answer, embedding, source) VALUES (${entry.question}, ${entry.answer}, ${vector}::vector, ${SOURCE})`);
   }
 
   await db.transaction(statements);
+
+  // Report what is stored now, not what this run embedded: unchanged knowledge is not embedded again but stays searchable
+  let knowledge = plan.kbEntries.length;
+  let searchable = plan.kbEntries.length - failedQuestions.size;
+  try {
+    const stored = await db`SELECT COUNT(*)::int AS total, COUNT(embedding)::int AS embedded FROM knowledge_base WHERE source = ${SOURCE}`;
+    knowledge = Number(stored[0].total);
+    searchable = Number(stored[0].embedded);
+  } catch (countErr) {
+    console.warn("Could not count knowledge entries after the sync:", countErr);
+  }
   return {
     products: plan.site.products.length,
     added: plan.newProducts.length,
     changed: plan.changed.length,
     deactivated: plan.deactivate.length,
-    knowledge: plan.kbChanged ? plan.kbEntries.length : plan.oldKbEntries,
-    knowledgeUpdated: plan.kbChanged,
-    embedded,
+    knowledge,
+    knowledgeUpdated: kbRows.length > 0 || kbDeleteIds.length > 0,
+    knowledgePending: failedQuestions.size,   // new or changed entries that could not be embedded (retried by the next sync)
+    embedded: searchable,
   };
 }

@@ -72,7 +72,7 @@ function describePlan(plan: SyncPlan): string {
     `📦 paketshop.uz: ${plan.site.products.length} ta mahsulot${unpriced ? ` (${unpriced} tasi narxsiz)` : ''}, ${plan.kbEntries.length} ta ma'lumot bo'limi o'qildi.`,
     `Mahsulotlar manbasi: ${plan.site.productSource === 'api' ? "sayt API'si (aniq ma'lumot)" : "sayt sahifalari (HTML)"}`,
     `Yangi: ${plan.newProducts.length} · O'zgargan: ${plan.changed.length} · O'zgarmagan: ${plan.unchanged}${plan.contentChanged ? ` · Tavsif/rasm o'zgargan: ${plan.contentChanged}` : ''}`,
-    `Bilimlar bazasi: ${plan.kbChanged ? "yangilanadi" : "o'zgarmagan"}${plan.needsWrite ? '' : ' · Qo\'llash kerak emas, hammasi dolzarb.'}`,
+    `Bilimlar bazasi: ${plan.kbChanged ? `yangilanadi (yangi/o'zgargan ${plan.kbInsert.length}, olib tashlanadi ${plan.kbDelete.length})` : "o'zgarmagan"}${plan.kbMissingEmbeddings ? ` · ${plan.kbMissingEmbeddings} ta bo'lim qidiruvga hali tayyor emas` : ''}${plan.needsWrite ? '' : ' · Qo\'llash kerak emas, hammasi dolzarb.'}`,
   ];
   if (plan.changed.length) lines.push('', "O'zgarishlar:", ...plan.changed.slice(0, 10).map(c => `• ${c.sku}: ${c.changes.join(', ')}`));
   if (plan.deactivate.length) {
@@ -140,7 +140,7 @@ ${plan.problems.length ? '' : "Qo'llash uchun: /sync apply"}`.trim());
       await recordBotEvent('catalog_synced', JSON.stringify(res));
       await ctx.reply(`✅ Tayyor.
 Mahsulotlar: ${res.products} (yangi ${res.added}, o'zgargan ${res.changed}, yashirilgan ${res.deactivated})
-Bilimlar bazasi: ${res.knowledge} bo'lim (${res.embedded} tasi qidiruvga tayyor)`);
+Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)' : " (o'zgarmagan edi)"}, qidiruvga tayyor: ${res.embedded}${res.knowledgePending ? `\n⚠️ ${res.knowledgePending} ta yangi bo'lim qidiruvga tayyorlanmadi (Gemini embedding xatosi); eskisi saqlandi. Birozdan keyin /sync apply ni qaytaring.` : ''}`);
     } catch (err: any) {
       console.error("Catalog sync failed:", describeErr(err));
       await recordBotEvent('catalog_sync_failed', describeErr(err));
