@@ -34,6 +34,12 @@ function coolDown(model: string, err: unknown) {
   const seconds = Math.min(120, hint ? Math.ceil(Number(hint[1])) : 30);
   modelCooldown.set(model, Date.now() + seconds * 1000);
 }
+// "High demand" (503) spikes and stalls come in bursts: after a model failed twice in a row (or stalled), skip it for
+// a short while so the next customers go straight to a fallback instead of waiting for the same failure first.
+const isOverloaded = (err: any) =>
+  Number(err?.status ?? err?.code) === 503 || /UNAVAILABLE|high demand|overloaded/i.test(String(err?.message || err));
+const OVERLOAD_PAUSE_MS = 45000;
+const pauseModel = (model: string) => modelCooldown.set(model, Date.now() + OVERLOAD_PAUSE_MS);
 function availableModels(models: (string | undefined)[]): string[] {
   const all = models.filter((m, i, arr): m is string => !!m && arr.indexOf(m) === i);
   const ready = all.filter(m => (modelCooldown.get(m) ?? 0) < Date.now());
@@ -61,6 +67,7 @@ export async function generateContentResilient(params: Parameters<typeof ai.mode
         if (controller.signal.aborted) {
           console.warn(`Gemini ${model} timed out after ${GEMINI_CALL_TIMEOUT_MS}ms, switching model`);
           await noteGeminiProblem('gemini_timeout', model, `no answer within ${GEMINI_CALL_TIMEOUT_MS}ms`);
+          pauseModel(model);
           break; // don't retry a model that just stalled
         }
         if (Number((err as any)?.status) === 400 && /think/i.test(String((err as any)?.message)) && params.config?.thinkingConfig) {
@@ -72,6 +79,7 @@ export async function generateContentResilient(params: Parameters<typeof ai.mode
         console.warn(`Gemini ${model} transient error (attempt ${attempt + 1}):`, (err as any)?.status ?? '', String((err as any)?.message || err).slice(0, 120));
         await noteGeminiProblem('gemini_error', model, err);
         if (isQuotaError(err)) { coolDown(model, err); break; }
+        if (attempt === 1 && isOverloaded(err)) pauseModel(model);
         if (attempt === 0) await new Promise(r => setTimeout(r, 700));
       } finally {
         clearTimeout(timer);
@@ -98,6 +106,7 @@ export async function generateContentStreamResilient(params: Parameters<typeof a
         if (controller.signal.aborted) {
           console.warn(`Gemini stream ${model} timed out after ${GEMINI_CALL_TIMEOUT_MS}ms, switching model`);
           await noteGeminiProblem('gemini_timeout', model, `stream did not start within ${GEMINI_CALL_TIMEOUT_MS}ms`);
+          pauseModel(model);
           break;
         }
         if (Number((err as any)?.status) === 400 && /think/i.test(String((err as any)?.message)) && params.config?.thinkingConfig) {
@@ -109,6 +118,7 @@ export async function generateContentStreamResilient(params: Parameters<typeof a
         console.warn(`Gemini stream ${model} transient error (attempt ${attempt + 1}):`, (err as any)?.status ?? '', String((err as any)?.message || err).slice(0, 120));
         await noteGeminiProblem('gemini_error', model, err);
         if (isQuotaError(err)) { coolDown(model, err); break; }
+        if (attempt === 1 && isOverloaded(err)) pauseModel(model);
         if (attempt === 0) await new Promise(r => setTimeout(r, 700));
       } finally {
         clearTimeout(timer);
@@ -161,6 +171,7 @@ SUHBAT USLUBI
 - Mijoz kimligi (kafe, do'kon, qandolatchi...) va taxminiy hajmi noma'lum bo'lsa, bir marta qisqa so'ra. Shunga qarab 1–3 ta mos variant tavsiya qil.
 - Xushmuomala, aniq va qisqa: odatda 1–3 jumla. Uzun ro'yxat berma.
 - Markdown ishlatma (javob ovozga ham aylantiriladi). Raqamlarni o'qishga oson yoz ("3 910 000 so'm").
+- Funksiya nomlarini va ichki ish jarayonini mijozga yozma. Hisob yoki qidiruv kerak bo'lsa, "hisoblayman" deb to'xtab qolma: funksiyani shu zahoti chaqir va natijasini ayt.
 - TIL: mijozning oxirgi xabari qaysi tilda bo'lsa (o'zbek, rus yoki ingliz), javobning HAMMASINI faqat shu tilda yoz; tillarni aralashtirma. Ruscha javobda: qadoq = упаковка, korobka = коробка, dona = шт., so'm = сум; mahsulot nomi va tavsifi uchun name_ru / description_ru dan foydalan. Inglizcha javobda: qadoq = pack, korobka = box, dona = pcs, so'm = UZS.
 - "Assalomu alaykum" ga: "Vaalaykum assalom! Men ${BRAND.assistantName}, PaketShop.uz yordamchisiman. Qanday mahsulot kerak?" de. Ruscha yoki inglizcha salomga shu ma'noda shu tilda javob ber.
 - Sen sun'iy intellektga asoslangan raqamli yordamchisan. O'zingni odam deb ko'rsatma; mijoz so'rasa, rostini ayt.
@@ -801,6 +812,9 @@ async function prefetchCatalog(message: string): Promise<string> {
   }
 }
 
+const TOOL_NAME = /\b(?:list_products|search_products|get_product_details|calculate_quote|create_request|check_order_status)\b/i;
+export const mentionsToolName = (text: string) => TOOL_NAME.test(text);
+
 // Conversational Chat Handler with Function Calling Loop, Parallel Pre-fetch, and Native Streaming
 // A photo the customer sent (e.g. a sample cup: "do you have this?")
 export type ImageAttachment = { data: string; mimeType: string };
@@ -863,6 +877,13 @@ export async function handleConversationalChat(
   let corrections = 1;
   let correctionPending = false;
   let streamedAlready = false;   // text already sent to the client through onChunk (the final reply then replaces it)
+  // Weaker fallback models sometimes describe a call instead of making it ("calculate_quote funksiyasini ishlatib
+  // hisoblayman") and stop there: such a reply gets one nudge to make the call and answer properly.
+  let toolNudges = 1;
+  const toolNudge = {
+    role: 'user',
+    parts: [{ text: "Tizim tekshiruvi: javobingda ichki funksiya nomi bor. Funksiya nomlarini mijozga yozma: kerak bo'lsa funksiyani hoziroq chaqir, keyin natija bilan mijoz tilida to'liq javob ber. Bu tekshiruv haqida gapirma." }],
+  };
   const correctionRequest = (badNumbers: number[]) => ({
     role: 'user',
     parts: [{ text: `Tizim tekshiruvi: javobingdagi ${badNumbers.map(formatAmount).join(', ')} raqam(lar)i sen olgan ma'lumotlarda (funksiya natijalari, bilimlar bazasi, mijoz xabari) yo'q. Narx, summa va sonlarni faqat funksiya natijalaridan AYNAN ko'chir yoki calculate_quote bilan hisobla. Javobni mijoz tilida qaytadan yoz; bu tekshiruv haqida gapirma.` }],
@@ -914,6 +935,13 @@ export async function handleConversationalChat(
 
         // The text is already on the customer's screen; if an amount doesn't check out, regenerate and the final reply replaces it
         streamedAlready = !!streamText;
+        if (toolNudges > 0 && mentionsToolName(responseText)) {
+          toolNudges--;
+          correctionPending = true;   // the next round runs with tools, so the call can actually be made
+          await recordEvent('tool_narration', responseText.slice(0, 160), 'gemini_events');
+          contents.push({ role: 'model', parts: [{ text: responseText }] }, toolNudge);
+          continue;
+        }
         const streamedBad = findUnverifiedNumbers(responseText, allowedNumbers);
         if (streamedBad.length && corrections > 0) {
           corrections--;
@@ -979,6 +1007,14 @@ export async function handleConversationalChat(
       // No function call: direct response ready
       const visibleText = parts.filter(p => p.text && !p.thought).map(p => p.text).join('').trim();
       const responseText = visibleText || "Kechirasiz, men buni tushunmadim.";
+
+      if (toolNudges > 0 && mentionsToolName(responseText)) {
+        toolNudges--;
+        correctionPending = true;
+        await recordEvent('tool_narration', responseText.slice(0, 160), 'gemini_events');
+        contents.push({ role: 'model', parts: [{ text: responseText }] }, toolNudge);
+        continue;
+      }
 
       const unverified = findUnverifiedNumbers(responseText, allowedNumbers);
       if (unverified.length) {

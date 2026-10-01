@@ -241,9 +241,11 @@ export async function calculateQuote(db: Sql, items: QuoteInput[]) {
     if (variantNote) lineNotes.push(variantNote);
 
     const lineTotal = price * packs;
+    const perPiece = packQty && packQty > 1 ? Math.round(price / packQty) : null;   // so "1 dona taxminan ..." can be quoted too
     total += lineTotal;
     lines.push({
       product_id: p.id, sku, name, packs, unit, pieces, price_per_pack: price, line_total: lineTotal,
+      approx_price_per_piece: perPiece ?? undefined, approx_price_per_piece_text: grouped(perPiece),
       pieces_text: grouped(pieces), price_per_pack_text: grouped(price), line_total_text: grouped(lineTotal),
       note: lineNotes.join('; ') || undefined,
     });
