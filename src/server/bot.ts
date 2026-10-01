@@ -182,7 +182,7 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
     try {
       if (appUrl.startsWith('https://')) {
         await ctx.reply(welcomeText, Markup.inlineKeyboard([
-          [getWebAppButton("\ud83d\uded2 Do'konni ochish", appUrl)]
+          [getWebAppButton("\ud83d\udcac Yordamchini ochish", appUrl)]
         ]));
       } else {
         // http:// URL — Telegram rejects inline URL buttons for non-HTTPS, send plain text
@@ -198,25 +198,7 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
         await recordBotEvent('start_reply_failed', describeErr(plainErr));
       }
     }
-    
-    try {
-      await ctx.sendChatAction('record_voice');
-      const voiceBase64 = await generateSpeech(welcomeText);
-      if (voiceBase64) {
-         const pcmBuffer = Buffer.from(voiceBase64, 'base64');
-         try {
-            await ctx.replyWithVoice({ source: pcmToMp3(pcmBuffer), filename: 'welcome.mp3' });
-         } catch (voiceSendErr) {
-            console.warn("Voice (MP3) failed on start, falling back to WAV audio player:", describeErr(voiceSendErr));
-            await recordBotEvent('start_voice_mp3_failed', describeErr(voiceSendErr));
-            const wavBuffer = pcmToWav(pcmBuffer);
-            await ctx.replyWithAudio({ source: wavBuffer, filename: 'welcome.wav' }, { title: BRAND.assistantName, performer: BRAND.shopName });
-         }
-      }
-    } catch (voiceErr) {
-      console.error("Error sending voice message to Telegram on start:", describeErr(voiceErr));
-      await recordBotEvent('start_voice_failed', describeErr(voiceErr));
-    }
+    // No voice greeting: the assistant answers with voice only when the customer speaks (saves the TTS quota)
   });
 
   // Unified handler to process incoming text and voice messages, supporting both regular and business chats
@@ -337,13 +319,13 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
          await ctx.telegram.sendMessage(chatId, plainText, replyOptions);
       }
 
-      // Generate and send Voice TTS Note
-      try {
+      // Voice answer only to a voice message: a typed question gets text (decided with the shop owner, saves the TTS quota)
+      if (isVoice) try {
          const speechText = plainText
             .replace(/https?:\/\/[^\s]+/g, '') // remove URLs
             .replace(/[#_*\[\]]/g, '')        // remove styling characters
             .trim();
-         
+
          if (speechText) {
             await sendAction('record_voice');
             const voiceBase64 = await generateSpeech(speechText);

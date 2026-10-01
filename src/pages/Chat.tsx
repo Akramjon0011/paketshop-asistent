@@ -75,7 +75,8 @@ export default function Chat() {
   const [input, setInput] = useState(() => searchParams.get('q') ?? '');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [isAudioEnabled, setIsAudioEnabled] = useState(true);
+  // Replies to typed messages are read aloud only when the customer turns sound on; a voice message always gets a voice answer
+  const [isAudioEnabled, setIsAudioEnabled] = useState(false);
   const [webSessionId, setWebSessionId] = useState('');
   const [isRecording, setIsRecording] = useState(false);
 
@@ -355,13 +356,11 @@ export default function Chat() {
         { id: modelMessageId, role: 'model', content: replyText }
       ]);
 
-      // Show the reply first; the voice is generated afterwards without blocking the chat
+      // Show the reply first; the voice is generated afterwards without blocking the chat (a spoken question gets a spoken answer)
       setIsLoading(false);
-      if (isAudioEnabled) {
-        generateSpeech(replyText)
-          .then(audioData => { if (audioData) playPCMBase64(audioData, modelMessageId); })
-          .catch(audioErr => console.error("TTS generation failed after voice message:", audioErr));
-      }
+      generateSpeech(replyText)
+        .then(audioData => { if (audioData) playPCMBase64(audioData, modelMessageId); })
+        .catch(audioErr => console.error("TTS generation failed after voice message:", audioErr));
     } catch (err: any) {
       console.error(err);
       setError("Ovozli xabarni qayta ishlashda xatolik yuz berdi.");
