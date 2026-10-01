@@ -114,12 +114,24 @@ export function isApiProduct(v: unknown): v is ApiProduct {
     && (v.publicPrice === null || typeof v.publicPrice === 'number');
 }
 
-// Same meaning as the fields the HTML reader produced, so quotes, search and the sync keep working unchanged
+// The site stores Uzbek apostrophes as ‘ ’ ʻ ʼ while customers type ': the same normalisation as the HTML reader, otherwise
+// a search for "tog'ora" would not find "tog‘ora"
+const normalizeLine = (s: string) => s.replace(/[‘’ʻʼ`´]/g, "'").replace(/[ \t]+/g, ' ').trim();
+const normalizeText = (s: string | null | undefined) => (s ?? '').split('\n').map(normalizeLine).filter(Boolean).join('\n');
+
+// Same meaning as the fields the HTML reader produced, so quotes, search and the sync keep working unchanged.
+// For products with variants the product page shows the first available variant (status, pieces per pack, and its price
+// when the product itself has none); the assistant tells the same story, and lists every variant in the details.
 export function apiToSiteProduct(p: ApiProduct): SiteProduct {
-  const price = positive(p.publicPrice) ? p.publicPrice : null;
+  const allVariants = p.variants ?? [];
+  const shown = allVariants.find(v => v.availabilityStatus === 'IN_STOCK' || v.availabilityStatus === 'LOW_STOCK') ?? allVariants[0];
+  const basePrice = positive(p.publicPrice) ? p.publicPrice : null;
+  const price = basePrice ?? (p.publicPrice === null && p.priceMode !== 'REQUEST_ONLY' && p.priceMode !== 'LOGIN_REQUIRED' && positive(shown?.price) ? shown!.price : null);
+  const unitsPerPack = positive(shown?.unitsPerPack) ? shown!.unitsPerPack! : p.unitsPerPack;
+  const unitsPerCarton = positive(shown?.unitsPerPack) ? shown!.unitsPerPack! * p.packsPerCarton : p.unitsPerCarton;
   const carton = p.saleUnit === 'CARTON';
-  const packQty = carton ? p.unitsPerCarton : p.unitsPerPack;   // pieces in one priced unit
-  const availability = availabilityOf(p.availabilityStatus);
+  const packQty = carton ? unitsPerCarton : unitsPerPack;   // pieces in one priced unit
+  const availability = availabilityOf(shown?.availabilityStatus ?? p.availabilityStatus);
 
   const tiers: PriceTier[] = price === null ? [] : (p.priceTiers ?? []).map(t => ({
     from: t.minQuantity,
@@ -128,14 +140,15 @@ export function apiToSiteProduct(p: ApiProduct): SiteProduct {
     price: t.price,
   }));
 
-  const variants: ProductVariant[] = (p.variants ?? []).slice(0, 30).map(v => ({
+  const hidePrices = p.priceMode === 'REQUEST_ONLY' || p.priceMode === 'LOGIN_REQUIRED';
+  const variants: ProductVariant[] = allVariants.slice(0, 30).map(v => ({
     sku: v.sku,
-    color: v.color ?? null,
-    size: v.size ?? null,
+    color: v.color ? normalizeLine(v.color) : null,
+    size: v.size ? normalizeLine(v.size) : null,
     volume_ml: v.volumeMl ?? null,
     thickness_micron: v.thicknessMicron ?? null,
     pieces_per_pack: v.unitsPerPack ?? null,
-    price: price === null || !positive(v.price) ? null : v.price,
+    price: hidePrices || !positive(v.price) ? null : v.price,
     availability: availabilityOf(v.availabilityStatus).code,
   }));
 
@@ -145,22 +158,23 @@ export function apiToSiteProduct(p: ApiProduct): SiteProduct {
       .map(([key, value]) => [DIMENSION_KEYS[key], value]),
   );
 
+  const name = normalizeLine(p.name.uz || p.name.ru || p.sku);
   return {
     url: p.url.uz,
     sku: p.sku,
-    name: p.name.uz || p.name.ru || p.sku,
-    name_ru: p.name.ru || null,
-    description: p.description.uz || p.shortDescription.uz || p.name.uz,
-    description_ru: p.description.ru || p.shortDescription.ru || null,
-    category: p.category.name.uz || null,
-    category_ru: p.category.name.ru || null,
+    name,
+    name_ru: normalizeLine(p.name.ru) || null,
+    description: normalizeText(p.description.uz || p.shortDescription.uz) || name,
+    description_ru: normalizeText(p.description.ru || p.shortDescription.ru) || null,
+    category: normalizeLine(p.category.name.uz) || null,
+    category_ru: normalizeLine(p.category.name.ru) || null,
     price,
     price_on_request: price === null,
     pack_unit: SALE_UNIT_UZ[p.saleUnit] ?? 'qadoq',
     pack_qty: packQty,
     pack_qty_unit: BASE_UNIT_UZ[p.baseUnit] ?? 'dona',
     packs_per_box: p.packsPerCarton > 1 ? p.packsPerCarton : null,
-    box_qty: p.unitsPerCarton > 1 ? p.unitsPerCarton : null,
+    box_qty: unitsPerCarton > 1 ? unitsPerCarton : null,
     unit_price: price !== null && packQty > 0 ? Math.round(price / packQty) : null,
     min_order: p.minimumOrderQuantity,
     price_tiers: tiers,
