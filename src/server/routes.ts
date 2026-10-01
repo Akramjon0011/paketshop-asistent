@@ -2,8 +2,9 @@ import express from 'express';
 import multer from 'multer';
 import { v2 as cloudinary } from 'cloudinary';
 import { sql, initDb } from './db.js';
-import { generateEmbedding, generateEmbeddingsBatch, searchKnowledgeBase, handleConversationalChat, handleConversationalChatStream, transcribeAudio, generateSpeech, generateSpeechDetailed, TTS_MODELS, BRAND, BRAND_GREETING, appendHistory } from './ai.js';
+import { generateEmbedding, generateEmbeddingsBatch, searchKnowledgeBase, handleConversationalChat, handleConversationalChatStream, transcribeAudio, generateSpeech, generateSpeechDetailed, TTS_MODELS, BRAND, BRAND_GREETING, appendHistory, type ChatUserContext } from './ai.js';
 import { runScheduledSync } from './scheduledSync.js';
+import { bridgeEnabled, hasSiteKey, rateLimitKey } from './siteBridge.js';
 import { timingSafeEqual } from 'crypto';
 import { GoogleGenAI } from "@google/genai";
 import { createRequire } from 'module';
@@ -40,7 +41,7 @@ async function uploadToCloudinary(buffer: Buffer, folder: string): Promise<strin
 
 // Basic health check endpoint
 router.get("/health", (req, res) => {
-  res.json({ status: "ok", commit: process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7), webAppUrl: process.env.APP_URL });
+  res.json({ status: "ok", commit: process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7), webAppUrl: process.env.APP_URL, siteBridge: bridgeEnabled() });
 });
 
 // Vercel Cron (see vercel.json) refreshes products and knowledge from paketshop.uz every morning.
@@ -87,9 +88,12 @@ router.get("/config", (_req, res) => {
 import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
 
+// Visitors of the paketshop.uz chat widget reach us through the site's server: rateLimitKey tells them apart
+// (X-Client-IP, trusted only together with the shared ASSISTANT_API_KEY) instead of counting them all as one address.
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 300, // Limit each IP to 300 requests per window (mobile carriers share IPs)
+  keyGenerator: rateLimitKey,
   message: { error: "Juda ko'p so'rov yuborildi. Iltimos 15 daqiqadan so'ng qayta urinib ko'ring." }
 });
 
@@ -104,6 +108,7 @@ const loginLimiter = rateLimit({
 const aiLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 20,
+  keyGenerator: rateLimitKey,
   message: { error: "Juda tez yozyapsiz. Bir daqiqadan so'ng qayta urinib ko'ring." }
 });
 
@@ -377,11 +382,28 @@ router.post("/knowledge/reindex", requireAdmin, async (req, res) => {
 
 // 1. Chat with Malika (Conversational E-Commerce)
 router.post("/chat", aiLimiter, async (req, res) => {
-  const { message, history, webSessionId } = req.body;
+  const { message, history, webSessionId, language, customerName } = req.body;
   if (!message) return res.status(400).json({ error: "Xabar majburiy" });
   try {
-    const replyText = await handleConversationalChat(message, history || [], { webSessionId });
-    res.json({ reply: replyText });
+    const context: ChatUserContext = {
+      webSessionId,
+      language: language === 'uz' || language === 'ru' || language === 'en' ? language : undefined,
+      customerName: typeof customerName === 'string' ? customerName : undefined,
+    };
+    const replyText = await handleConversationalChat(message, history || [], context);
+
+    // The paketshop.uz widget shows a link to the product the answer recommends ([BUYURTMA: id] tag -> page address)
+    let product: { id: number; name: string; url: string } | null = null;
+    const productId = hasSiteKey(req.headers.authorization) ? /\[BUYURTMA:\s*(\d+)\]/i.exec(replyText)?.[1] : undefined;
+    if (productId && sql) {
+      try {
+        const rows = await sql`SELECT id, name, url FROM products WHERE id = ${productId} AND active AND url IS NOT NULL`;
+        if (rows[0]) product = { id: rows[0].id, name: rows[0].name, url: rows[0].url };
+      } catch (lookupErr) {
+        console.warn("Product link lookup failed:", lookupErr);
+      }
+    }
+    res.json({ reply: replyText, ...(product ? { product } : {}) });
   } catch (err) {
     console.error("Chat error:", err);
     res.status(500).json({ error: "Tizimda xatolik yuz berdi" });

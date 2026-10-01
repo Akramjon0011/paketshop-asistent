@@ -8,7 +8,7 @@ export const sql = process.env.DATABASE_URL ? neon(process.env.DATABASE_URL) : n
 export type Sql = NonNullable<typeof sql>;
 
 // Bump when the DDL below changes; cold starts skip all DDL when the stored version matches.
-const SCHEMA_VERSION = '2026-09-30-b2b-catalog-2';
+const SCHEMA_VERSION = '2026-10-01-site-bridge-1';
 
 // All DDL for the schema, run as one transaction (one round trip instead of ~30)
 export function schemaStatements(db: Sql) {
@@ -57,6 +57,12 @@ export function schemaStatements(db: Sql) {
     db`ALTER TABLE products ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`,
     db`ALTER TABLE products ADD COLUMN IF NOT EXISTS synced_at TIMESTAMP`,
     db`ALTER TABLE products ADD COLUMN IF NOT EXISTS sync_hash TEXT`,
+    // Filled when the catalogue is read from the storefront API (siteBridge.ts)
+    db`ALTER TABLE products ADD COLUMN IF NOT EXISTS availability TEXT`,
+    db`ALTER TABLE products ADD COLUMN IF NOT EXISTS price_from BOOLEAN DEFAULT FALSE`,
+    db`ALTER TABLE products ADD COLUMN IF NOT EXISTS order_step INTEGER`,
+    db`ALTER TABLE products ADD COLUMN IF NOT EXISTS variants JSONB`,
+    db`ALTER TABLE products ADD COLUMN IF NOT EXISTS dimensions JSONB`,
     db`CREATE UNIQUE INDEX IF NOT EXISTS idx_products_sku ON products(sku)`,
 
     // Orders double as the assistant's "requests" (a manager confirms stock and the final price)
@@ -71,6 +77,7 @@ export function schemaStatements(db: Sql) {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`,
     db`ALTER TABLE orders ADD COLUMN IF NOT EXISTS notes TEXT`,
+    db`ALTER TABLE orders ADD COLUMN IF NOT EXISTS site_lead_id TEXT`,   // the same request as a lead in the paketshop.uz CRM
 
     // CRM
     db`CREATE TABLE IF NOT EXISTS customers (

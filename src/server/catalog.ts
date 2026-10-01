@@ -4,7 +4,8 @@
 import { createHash } from 'crypto';
 import type { Sql } from './db.js';
 import { fetchInfoSections, fetchProducts, type SiteProduct, type SiteSection } from './paketshop.js';
-import { notifyNewRequest } from './notify.js';
+import { notifyNewRequest, type RequestNotice } from './notify.js';
+import { bridgeEnabled, fetchSiteCatalog, submitSiteLead, type LeadInput, type SiteLead } from './siteBridge.js';
 import { tashkentNow } from './shopInfo.js';
 
 const SOURCE = 'paketshop.uz';
@@ -16,7 +17,12 @@ type Row = Record<string, any>;
 
 // The model gets neutral codes/English notes (not Uzbek sentences) so it phrases everything in the customer's own language
 // instead of mixing languages; the system prompt explains each code.
-function availability(note: string | null): 'in_stock' | 'low_stock' | 'check_with_manager' {
+const AVAILABILITY_CODES = new Set(['in_stock', 'low_stock', 'check_with_manager', 'on_order', 'out_of_stock', 'discontinued']);
+
+// Rows read from the storefront API carry the code itself; rows read from HTML only have the site's wording
+function availability(r: Row): string {
+  if (AVAILABILITY_CODES.has(r.availability)) return r.availability;
+  const note: string | null = r.stock_note;
   if (note && /mavjud/i.test(note)) return 'in_stock';
   if (note && /kam/i.test(note)) return 'low_stock';
   return 'check_with_manager';
@@ -38,24 +44,30 @@ function compact(r: Row) {
     price_per_pack: price,
     price_per_pack_text: grouped(price),
     price_on_request: r.price_on_request ? true : undefined,
+    starting_price: !r.price_on_request && r.price_from ? true : undefined,   // the price is "from X": depends on the variant
     pack_unit: r.pack_unit || 'qadoq',
     pieces_per_pack: pieces,
     pieces_per_pack_text: grouped(pieces),
     approx_price_per_piece: perPiece,
     approx_price_per_piece_text: grouped(perPiece),
-    availability: availability(r.stock_note),
+    availability: availability(r),
   };
 }
 
 function detailed(r: Row) {
   const tiers = Array.isArray(r.price_tiers) ? r.price_tiers : [];
+  const variants = Array.isArray(r.variants) ? r.variants : [];
+  const dimensions = r.dimensions && typeof r.dimensions === 'object' && Object.keys(r.dimensions).length ? r.dimensions : undefined;
   return {
     ...compact(r),
     description: String(r.description || '').slice(0, 1200),
     description_ru: r.description_ru ? String(r.description_ru).slice(0, 600) : undefined,
     min_order_packs: num(r.min_order),
+    order_step_packs: r.order_step && Number(r.order_step) > 1 ? Number(r.order_step) : undefined,
     packs_per_box: num(r.packs_per_box),
     pieces_per_box: num(r.box_qty),
+    dimensions,
+    variants: variants.length ? variants.map((v: Row) => ({ ...v, price_text: grouped(num(v.price)) })) : undefined,
     volume_prices: tiers.length ? tiers : undefined,
     volume_prices_note: tiers.length ? "Only for these quantity ranges; for other quantities the manager sets the price" : undefined,
     product_page: r.url || undefined,
@@ -95,10 +107,10 @@ export function queryTokens(query: string): string[] {
 export async function listProducts(db: Sql, category?: string) {
   const cat = category?.trim();
   const rows = cat
-    ? await db`SELECT id, sku, name, name_ru, category, price, price_on_request, pack_unit, pack_qty, unit_price, stock_note
+    ? await db`SELECT id, sku, name, name_ru, category, price, price_on_request, price_from, pack_unit, pack_qty, unit_price, stock_note, availability
                FROM products WHERE active AND (category ILIKE ${'%' + escapeLike(cat) + '%'} OR category_ru ILIKE ${'%' + escapeLike(cat) + '%'})
                ORDER BY category, id`
-    : await db`SELECT id, sku, name, name_ru, category, price, price_on_request, pack_unit, pack_qty, unit_price, stock_note
+    : await db`SELECT id, sku, name, name_ru, category, price, price_on_request, price_from, pack_unit, pack_qty, unit_price, stock_note, availability
                FROM products WHERE active ORDER BY category, id`;
   const counts = new Map<string, number>();
   for (const r of rows) counts.set(r.category ?? '-', (counts.get(r.category ?? '-') ?? 0) + 1);
@@ -120,7 +132,7 @@ export async function searchProducts(db: Sql, query: string, opts: { minScore?: 
   const patterns = tokens.map(t => `%${escapeLike(t)}%`);
   const rows = await db`
     SELECT * FROM (
-      SELECT id, sku, name, name_ru, category, price, price_on_request, pack_unit, pack_qty, unit_price, stock_note,
+      SELECT id, sku, name, name_ru, category, price, price_on_request, price_from, pack_unit, pack_qty, unit_price, stock_note, availability,
         (SELECT COUNT(*) FROM unnest(${patterns}::text[]) AS p
           WHERE (coalesce(sku, '') || ' ' || name || ' ' || coalesce(name_ru, '') || ' ' || coalesce(category, '') || ' ' || coalesce(category_ru, '')
                  || ' ' || (CASE WHEN ${nameOnly}::boolean THEN '' ELSE coalesce(description, '') || ' ' || coalesce(description_ru, '') END)) ILIKE p) AS score
@@ -131,8 +143,9 @@ export async function searchProducts(db: Sql, query: string, opts: { minScore?: 
 }
 
 export async function getProduct(db: Sql, id: number) {
-  const r = await db`SELECT id, sku, name, name_ru, description, description_ru, category, category_ru, price, price_on_request,
-      pack_unit, pack_qty, pack_qty_unit, packs_per_box, box_qty, unit_price, min_order, price_tiers, stock_note, url, image_url
+  const r = await db`SELECT id, sku, name, name_ru, description, description_ru, category, category_ru, price, price_on_request, price_from,
+      pack_unit, pack_qty, pack_qty_unit, packs_per_box, box_qty, unit_price, min_order, order_step, price_tiers, stock_note, availability,
+      variants, dimensions, url, image_url
     FROM products WHERE id = ${id} AND active`;
   if (r.length === 0) return { error: "Product not found" };
   return { success: true, product: detailed(r[0]) };
@@ -155,7 +168,8 @@ export async function calculateQuote(db: Sql, items: QuoteInput[]) {
     const packs = Number(item?.packs);
     const id = Number(item?.product_id);
     if (!Number.isInteger(id) || !Number.isInteger(packs) || packs < 1 || packs > 100000) return { error: "Invalid product id or number of packs" };
-    const rows = await db`SELECT id, sku, name, price, price_on_request, pack_unit, pack_qty, pack_qty_unit, min_order, price_tiers
+    const rows = await db`SELECT id, sku, name, price, price_on_request, price_from, pack_unit, pack_qty, pack_qty_unit, min_order, order_step,
+                            price_tiers, stock_note, availability
                           FROM products WHERE id = ${id} AND active`;
     const p = rows[0];
     if (!p) return { error: `Product not found (id ${id})` };
@@ -179,6 +193,13 @@ export async function calculateQuote(db: Sql, items: QuoteInput[]) {
     const maxTier = tiers.reduce((m, t) => Math.max(m, t.to ?? t.from), 0);
     if (tiers.length && packs > maxTier) lineNotes.push("Beyond the listed volume tiers: the manager sets the price for this quantity");
     if (p.min_order && packs < Number(p.min_order)) lineNotes.push(`Minimum order is ${p.min_order} ${unit}`);
+    const step = Number(p.order_step);
+    if (step > 1 && (packs - (Number(p.min_order) || 1)) % step !== 0) lineNotes.push(`This product is ordered in steps of ${step} ${unit} (from ${Number(p.min_order) || 1}): the manager adjusts the quantity`);
+    const stock = availability(p);
+    if (stock === 'out_of_stock') lineNotes.push("Currently out of stock: the manager will say when it is available again");
+    else if (stock === 'discontinued') lineNotes.push("This product is no longer sold: suggest an alternative");
+    else if (stock === 'on_order') lineNotes.push("Made to order: the manager confirms the lead time");
+    if (p.price_from) lineNotes.push("This is a starting price (from): the manager confirms the exact price for the chosen variant");
 
     const lineTotal = price * packs;
     total += lineTotal;
@@ -206,12 +227,21 @@ export type RequestInput = {
   items: QuoteInput[];
 };
 
-export type RequestContext = { telegramId?: number; webSessionId?: string };
+export type RequestContext = { telegramId?: number; webSessionId?: string; language?: 'uz' | 'ru' | 'en' };
+
+// Injectable so tests don't call the storefront or Telegram
+export type RequestDeps = {
+  submitLead?: (lead: LeadInput) => Promise<SiteLead | null>;
+  notify?: (notice: RequestNotice) => Promise<void>;
+};
 
 const HOURLY_LIMIT_PER_PHONE = 3;
 const HOURLY_LIMIT_TOTAL = 40;
 
-export async function createRequest(db: Sql, input: RequestInput, ctx: RequestContext = {}) {
+// Chat widget on paketshop.uz sends its conversations with a "site_" session id
+const fromSiteWidget = (ctx: RequestContext) => !!ctx.webSessionId?.startsWith('site_');
+
+export async function createRequest(db: Sql, input: RequestInput, ctx: RequestContext = {}, deps: RequestDeps = {}) {
   const name = String(input?.customer_name ?? '').trim();
   const phone = String(input?.customer_phone ?? '').trim();
   const region = String(input?.region ?? '').trim();
@@ -256,18 +286,50 @@ export async function createRequest(db: Sql, input: RequestInput, ctx: RequestCo
     console.error("CRM sync failed after request:", crmErr);
   }
 
-  await notifyNewRequest({
-    requestId,
-    customerName: name,
-    customerPhone: phone,
-    region: address,
-    company: input.company?.trim() || undefined,
-    notes: input.notes?.trim() || undefined,
-    lines: quote.lines,
-    total: quote.total_estimate,
-    pricedAll: quote.priced_all,
-    source: ctx.telegramId ? 'Telegram bot' : ctx.webSessionId ? 'Veb-sayt' : "Noma'lum",
-  });
+  // Hand the request to the storefront CRM (a lead there). When that fails, or the site did not alert its managers,
+  // the managers are alerted from here, so a request is never silent.
+  let lead: SiteLead | null = null;
+  try {
+    lead = await (deps.submitLead ?? submitSiteLead)({
+      name,
+      phone,
+      city: region,
+      company: input.company?.trim(),
+      note: [
+        `So'rov #${requestId} (AI yordamchi).`,
+        `Taxminiy jami: ${grouped(quote.total_estimate)} so'm${quote.priced_all ? '' : " (narxsiz mahsulotlarsiz)"}.`,
+        input.delivery_method?.trim() && `Yetkazish: ${input.delivery_method.trim()}.`,
+        input.notes?.trim() && `Izoh: ${input.notes.trim()}`,
+      ].filter(Boolean).join(' '),
+      products: quote.lines.map((l: any) => `${l.name}${l.sku ? ` [${l.sku}]` : ''} — ${l.packs} ${l.unit}`).join('; '),
+      source: ctx.telegramId ? 'AI yordamchi (Telegram)' : fromSiteWidget(ctx) ? 'AI yordamchi (Sayt)' : 'AI yordamchi (Veb)',
+      locale: ctx.language === 'ru' ? 'ru' : 'uz',
+    });
+  } catch (leadErr) {
+    console.error("Hand-over to the site failed:", leadErr);   // the request is saved: the managers are alerted below
+  }
+  if (lead) {
+    try {
+      await db`UPDATE orders SET site_lead_id = ${lead.id} WHERE id = ${requestId}`;
+    } catch (linkErr) {
+      console.error("Could not store the site lead id:", linkErr);
+    }
+  }
+
+  if (!lead?.notified || process.env.ALWAYS_NOTIFY_ADMINS === 'true') {
+    await (deps.notify ?? notifyNewRequest)({
+      requestId,
+      customerName: name,
+      customerPhone: phone,
+      region: address,
+      company: input.company?.trim() || undefined,
+      notes: input.notes?.trim() || undefined,
+      lines: quote.lines,
+      total: quote.total_estimate,
+      pricedAll: quote.priced_all,
+      source: `${ctx.telegramId ? 'Telegram bot' : fromSiteWidget(ctx) ? 'paketshop.uz sayti (chat)' : ctx.webSessionId ? 'Veb-sayt' : "Noma'lum"}${lead ? ` · sayt CRM #${lead.id}` : ''}`,
+    });
+  }
 
   return { success: true, request_id: requestId, total_estimate: quote.total_estimate, priced_all: quote.priced_all, ...hoursInfo() };
 }
@@ -284,7 +346,12 @@ function hoursInfo() {
 
 // ---------- paketshop.uz sync ----------
 
-export type SiteData = { products: SiteProduct[]; sections: SiteSection[]; errors: string[] };
+export type SiteData = {
+  products: SiteProduct[];
+  sections: SiteSection[];
+  errors: string[];
+  productSource?: 'api' | 'html';   // where the products were read from (storefront API or page HTML)
+};
 
 export type SyncPlan = {
   site: SiteData;
@@ -304,15 +371,34 @@ export type SyncPlan = {
 
 // Everything the sync stores for a product; a different fingerprint means the site changed something
 export function fingerprint(p: SiteProduct): string {
-  const fields = [p.name, p.description, p.price, p.image_url, p.category, p.url, p.name_ru, p.description_ru, p.category_ru,
+  const fields: unknown[] = [p.name, p.description, p.price, p.image_url, p.category, p.url, p.name_ru, p.description_ru, p.category_ru,
     p.price_on_request, p.pack_unit, p.pack_qty, p.pack_qty_unit, p.packs_per_box, p.box_qty, p.unit_price, p.min_order,
     p.price_tiers, p.stock_note];
+  // Fields only the storefront API provides join the hash only when present, so products read from HTML keep their old hash
+  if (p.availability !== undefined || p.price_from || p.order_step || p.variants?.length || p.dimensions) {
+    fields.push(p.availability ?? null, p.price_from ?? false, p.order_step ?? null, p.variants ?? [], p.dimensions ?? null);
+  }
   return createHash('sha1').update(JSON.stringify(fields)).digest('hex');
 }
 
+// Products come from the storefront API when the bridge is configured (exact data: stock status, variants, steps);
+// otherwise, or when the API fails, from the public pages. Information pages (delivery, payment, FAQ) are always read from HTML.
+async function readProducts(): Promise<{ products: SiteProduct[]; errors: string[]; source: 'api' | 'html' }> {
+  const notes: string[] = [];
+  if (bridgeEnabled()) {
+    try {
+      return { ...(await fetchSiteCatalog()), source: 'api' };
+    } catch (err) {
+      notes.push(`Sayt API'si ishlamadi, mahsulotlar HTML orqali o'qildi: ${String((err as any)?.message || err).slice(0, 150)}`);
+    }
+  }
+  const html = await fetchProducts();
+  return { products: html.products, errors: [...notes, ...html.errors], source: 'html' };
+}
+
 export async function readSite(): Promise<SiteData> {
-  const [{ products, errors }, { sections, errors: e2 }] = await Promise.all([fetchProducts(), fetchInfoSections()]);
-  return { products, sections, errors: [...errors, ...e2] };
+  const [{ products, errors, source }, { sections, errors: e2 }] = await Promise.all([readProducts(), fetchInfoSections()]);
+  return { products, sections, errors: [...errors, ...e2], productSource: source };
 }
 
 // "Katalog" overview entries so questions like "nima sotasiz?" hit the knowledge base
@@ -401,10 +487,13 @@ export async function applyCatalogSync(db: Sql, plan: SyncPlan, embed: Embedder)
     statements.push(db`
       INSERT INTO products (sku, name, description, price, image_url, category, stock, url, name_ru, description_ru, category_ru,
         price_on_request, pack_unit, pack_qty, pack_qty_unit, packs_per_box, box_qty, unit_price, min_order, price_tiers, stock_note,
-        source, active, synced_at, sync_hash)
+        availability, price_from, order_step, variants, dimensions, source, active, synced_at, sync_hash)
       VALUES (${p.sku}, ${p.name}, ${p.description}, ${p.price ?? 0}, ${p.image_url}, ${p.category}, 999999, ${p.url}, ${p.name_ru}, ${p.description_ru}, ${p.category_ru},
         ${p.price_on_request}, ${p.pack_unit}, ${p.pack_qty}, ${p.pack_qty_unit}, ${p.packs_per_box}, ${p.box_qty}, ${p.unit_price}, ${p.min_order},
-        ${JSON.stringify(p.price_tiers)}::jsonb, ${p.stock_note}, ${SOURCE}, TRUE, CURRENT_TIMESTAMP, ${fingerprint(p)})
+        ${JSON.stringify(p.price_tiers)}::jsonb, ${p.stock_note},
+        ${p.availability ?? null}, ${p.price_from ?? false}, ${p.order_step ?? null},
+        ${p.variants ? JSON.stringify(p.variants) : null}::jsonb, ${p.dimensions ? JSON.stringify(p.dimensions) : null}::jsonb,
+        ${SOURCE}, TRUE, CURRENT_TIMESTAMP, ${fingerprint(p)})
       ON CONFLICT (sku) DO UPDATE SET
         name = EXCLUDED.name, description = EXCLUDED.description, price = EXCLUDED.price, image_url = EXCLUDED.image_url,
         category = EXCLUDED.category, stock = EXCLUDED.stock, url = EXCLUDED.url, name_ru = EXCLUDED.name_ru,
@@ -412,6 +501,8 @@ export async function applyCatalogSync(db: Sql, plan: SyncPlan, embed: Embedder)
         pack_unit = EXCLUDED.pack_unit, pack_qty = EXCLUDED.pack_qty, pack_qty_unit = EXCLUDED.pack_qty_unit,
         packs_per_box = EXCLUDED.packs_per_box, box_qty = EXCLUDED.box_qty, unit_price = EXCLUDED.unit_price,
         min_order = EXCLUDED.min_order, price_tiers = EXCLUDED.price_tiers, stock_note = EXCLUDED.stock_note,
+        availability = EXCLUDED.availability, price_from = EXCLUDED.price_from, order_step = EXCLUDED.order_step,
+        variants = EXCLUDED.variants, dimensions = EXCLUDED.dimensions,
         source = EXCLUDED.source, active = TRUE, synced_at = CURRENT_TIMESTAMP, sync_hash = EXCLUDED.sync_hash`);
   }
   if (plan.deactivate.length) {

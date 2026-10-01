@@ -1,0 +1,289 @@
+// Bridge to the paketshop.uz storefront:
+//  - reads the live catalogue from the site's API (no more page scraping for products),
+//  - hands customers' requests over to the site's CRM as a lead,
+//  - recognises the site's own server-to-server calls (shared secret) so rate limits count real visitors.
+// Everything is inactive until ASSISTANT_API_KEY is set (the same secret the site holds), and every failure falls back
+// to the previous behaviour (HTML reader, own Telegram alert).
+
+import type { Request } from 'express';
+import { createHash, timingSafeEqual } from 'crypto';
+import { ipKeyGenerator } from 'express-rate-limit';
+import type { PriceTier, ProductVariant, SiteProduct } from './paketshop.js';
+
+const MIN_KEY_LENGTH = 24;
+const PAGE_SIZE = 100;
+const MAX_PAGES = 30;
+
+type Fetch = typeof fetch;
+
+export function siteApiKey(): string | null {
+  const key = process.env.ASSISTANT_API_KEY?.trim();
+  return key && key.length >= MIN_KEY_LENGTH ? key : null;
+}
+
+// www: the apex domain redirects (308) and fetch would drop the Authorization header on a cross-origin redirect
+export function siteBaseUrl(): string {
+  return (process.env.SITE_URL?.trim() || 'https://www.paketshop.uz').replace(/\/+$/, '');
+}
+
+export const bridgeEnabled = () => siteApiKey() !== null;
+
+// ---------- calls coming from the site ----------
+
+const digest = (value: string) => createHash('sha256').update(value).digest();
+
+export function hasSiteKey(authorization: string | undefined): boolean {
+  const key = siteApiKey();
+  if (!key) return false;
+  const match = /^Bearer\s+(\S+)$/i.exec(authorization ?? '');
+  if (!match) return false;
+  return timingSafeEqual(digest(match[1]), digest(key));   // equal-length digests: nothing leaks about the key
+}
+
+// Rate limit per customer. Requests forwarded by the storefront come from one server address, so they carry the
+// visitor's address in X-Client-IP; it is trusted only together with the shared key.
+export function rateLimitKey(req: Request): string {
+  if (hasSiteKey(req.headers.authorization)) {
+    const forwarded = String(req.headers['x-client-ip'] ?? '').trim();
+    if (forwarded.length > 0 && forwarded.length <= 64 && /^[0-9a-f:.]+$/i.test(forwarded)) return `site:${ipKeyGenerator(forwarded)}`;
+  }
+  return ipKeyGenerator(req.ip ?? 'unknown');
+}
+
+// ---------- catalogue ----------
+
+const SALE_UNIT_UZ: Record<string, string> = { PIECE: 'dona', PACK: 'qadoq', CARTON: 'korobka', ROLL: 'rulon', KILOGRAM: 'kg' };
+const BASE_UNIT_UZ: Record<string, string> = { PIECE: 'dona', METER: 'metr', KILOGRAM: 'kg', ROLL: 'rulon', LITER: 'litr' };
+
+// The site's availability enum -> neutral code for the model + the wording the site itself shows (kept in stock_note)
+const AVAILABILITY: Record<string, { code: string; note: string }> = {
+  IN_STOCK: { code: 'in_stock', note: 'Omborda mavjud' },
+  LOW_STOCK: { code: 'low_stock', note: 'Kam qoldi' },
+  CHECK_AVAILABILITY: { code: 'check_with_manager', note: 'Qoldiqni aniqlang' },
+  ON_ORDER: { code: 'on_order', note: 'Buyurtma asosida' },
+  OUT_OF_STOCK: { code: 'out_of_stock', note: "Vaqtincha yo'q" },
+  DISCONTINUED: { code: 'discontinued', note: 'Sotuvdan chiqarilgan' },
+};
+const availabilityOf = (status: unknown) => AVAILABILITY[String(status)] ?? AVAILABILITY.CHECK_AVAILABILITY;
+
+const DIMENSION_KEYS: Record<string, string> = {
+  lengthCm: 'length_cm', widthCm: 'width_cm', heightCm: 'height_cm',
+  volumeMl: 'volume_ml', diameterMm: 'diameter_mm', thicknessMicron: 'thickness_micron',
+};
+
+// Shape returned by GET /api/assistant/catalog (AssistantProduct in the site's lib/domain/assistantCatalog.ts)
+export type ApiProduct = {
+  sku: string;
+  legacySku: string | null;
+  url: { uz: string; ru: string };
+  name: { uz: string; ru: string };
+  shortDescription: { uz: string; ru: string };
+  description: { uz: string; ru: string };
+  category: { slug: string; name: { uz: string; ru: string } };
+  priceMode: string;
+  publicPrice: number | null;
+  availabilityStatus: string;
+  baseUnit: string;
+  saleUnit: string;
+  unitsPerPack: number;
+  packsPerCarton: number;
+  unitsPerCarton: number;
+  minimumOrderQuantity: number;
+  orderStep: number;
+  dimensions?: Record<string, number>;
+  images?: string[];
+  variants?: Array<{
+    sku: string; color: string | null; size: string | null; volumeMl: number | null; thicknessMicron: number | null;
+    unitsPerPack: number | null; price: number | null; availabilityStatus: string;
+  }>;
+  priceTiers?: Array<{ minQuantity: number; maxQuantity: number | null; price: number; priceUnit: string }>;
+};
+
+const isObject = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v);
+const isPair = (v: unknown) => isObject(v) && typeof v.uz === 'string' && typeof v.ru === 'string';
+const positive = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
+
+export function isApiProduct(v: unknown): v is ApiProduct {
+  return isObject(v)
+    && typeof v.sku === 'string' && v.sku.trim() !== ''
+    && isPair(v.url) && isPair(v.name) && isPair(v.shortDescription) && isPair(v.description)
+    && isObject(v.category) && isPair(v.category.name)
+    && typeof v.priceMode === 'string' && typeof v.saleUnit === 'string' && typeof v.availabilityStatus === 'string'
+    && positive(v.unitsPerPack) && positive(v.packsPerCarton) && positive(v.unitsPerCarton)
+    && positive(v.minimumOrderQuantity) && positive(v.orderStep)
+    && (v.publicPrice === null || typeof v.publicPrice === 'number');
+}
+
+// Same meaning as the fields the HTML reader produced, so quotes, search and the sync keep working unchanged
+export function apiToSiteProduct(p: ApiProduct): SiteProduct {
+  const price = positive(p.publicPrice) ? p.publicPrice : null;
+  const carton = p.saleUnit === 'CARTON';
+  const packQty = carton ? p.unitsPerCarton : p.unitsPerPack;   // pieces in one priced unit
+  const availability = availabilityOf(p.availabilityStatus);
+
+  const tiers: PriceTier[] = price === null ? [] : (p.priceTiers ?? []).map(t => ({
+    from: t.minQuantity,
+    to: t.maxQuantity ?? null,
+    unit: SALE_UNIT_UZ[t.priceUnit] ?? 'qadoq',
+    price: t.price,
+  }));
+
+  const variants: ProductVariant[] = (p.variants ?? []).slice(0, 30).map(v => ({
+    sku: v.sku,
+    color: v.color ?? null,
+    size: v.size ?? null,
+    volume_ml: v.volumeMl ?? null,
+    thickness_micron: v.thicknessMicron ?? null,
+    pieces_per_pack: v.unitsPerPack ?? null,
+    price: price === null || !positive(v.price) ? null : v.price,
+    availability: availabilityOf(v.availabilityStatus).code,
+  }));
+
+  const dimensions = Object.fromEntries(
+    Object.entries(p.dimensions ?? {})
+      .filter(([key, value]) => key in DIMENSION_KEYS && positive(value))
+      .map(([key, value]) => [DIMENSION_KEYS[key], value]),
+  );
+
+  return {
+    url: p.url.uz,
+    sku: p.sku,
+    name: p.name.uz || p.name.ru || p.sku,
+    name_ru: p.name.ru || null,
+    description: p.description.uz || p.shortDescription.uz || p.name.uz,
+    description_ru: p.description.ru || p.shortDescription.ru || null,
+    category: p.category.name.uz || null,
+    category_ru: p.category.name.ru || null,
+    price,
+    price_on_request: price === null,
+    pack_unit: SALE_UNIT_UZ[p.saleUnit] ?? 'qadoq',
+    pack_qty: packQty,
+    pack_qty_unit: BASE_UNIT_UZ[p.baseUnit] ?? 'dona',
+    packs_per_box: p.packsPerCarton > 1 ? p.packsPerCarton : null,
+    box_qty: p.unitsPerCarton > 1 ? p.unitsPerCarton : null,
+    unit_price: price !== null && packQty > 0 ? Math.round(price / packQty) : null,
+    min_order: p.minimumOrderQuantity,
+    price_tiers: tiers,
+    stock_note: availability.note,
+    image_url: p.images?.[0] ?? null,
+    availability: availability.code,
+    price_from: p.priceMode === 'FROM_PRICE',
+    order_step: p.orderStep > 1 ? p.orderStep : null,
+    variants,
+    dimensions: Object.keys(dimensions).length ? dimensions : null,
+  };
+}
+
+// Reads every active product from the storefront; throws when the API cannot be used (caller falls back to the HTML reader)
+export async function fetchSiteCatalog(opts: { fetch?: Fetch } = {}): Promise<{ products: SiteProduct[]; errors: string[] }> {
+  const key = siteApiKey();
+  if (!key) throw new Error('ASSISTANT_API_KEY is not set');
+  const doFetch = opts.fetch ?? fetch;
+  const products: SiteProduct[] = [];
+  const errors: string[] = [];
+  const seen = new Set<string>();
+  let cursor: string | null = null;
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const url = new URL('/api/assistant/catalog', siteBaseUrl());
+    url.searchParams.set('limit', String(PAGE_SIZE));
+    if (cursor) url.searchParams.set('cursor', cursor);
+
+    let data: any;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const res = await doFetch(url, {
+          headers: { Authorization: `Bearer ${key}`, Accept: 'application/json', 'User-Agent': 'PaketshopAssistant/1.0' },
+          signal: AbortSignal.timeout(20000),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        data = await res.json();
+        break;
+      } catch (err) {
+        if (attempt >= 2) throw new Error(`site catalog API: ${String((err as any)?.message || err)}`);
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+
+    if (!isObject(data) || !Array.isArray(data.products)) throw new Error('site catalog API: unexpected response');
+    for (const raw of data.products) {
+      if (!isApiProduct(raw)) { errors.push(`site catalog API: skipped an invalid product (${isObject(raw) ? String(raw.sku) : typeof raw})`); continue; }
+      if (seen.has(raw.sku)) continue;
+      seen.add(raw.sku);
+      products.push(apiToSiteProduct(raw));
+    }
+
+    cursor = typeof data.nextCursor === 'string' && data.nextCursor ? data.nextCursor : null;
+    if (!cursor) return { products, errors };
+  }
+  throw new Error('site catalog API: too many pages');
+}
+
+// ---------- requests -> site CRM ----------
+
+// Same rule as the site's normalizeUzbekPhone: "+998" + 9 digits, anything else is not accepted by its lead API
+export function normalizeUzbekPhone(value: unknown): string | null {
+  let digits = String(value ?? '').replace(/\D/g, '');
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  if (digits.length === 9) digits = `998${digits}`;
+  return /^998\d{9}$/.test(digits) ? `+${digits}` : null;
+}
+
+export type LeadInput = {
+  name: string;
+  phone: string;
+  city?: string;
+  company?: string;
+  note?: string;       // request number, estimate, delivery, comments
+  products?: string;   // what the customer asked for
+  source: string;      // "AI yordamchi (Telegram)" ...
+  locale?: 'uz' | 'ru';
+};
+
+export type SiteLead = { id: string; notified: boolean };
+
+const clip = (s: string | undefined, max: number) => (s ?? '').trim().slice(0, max);
+
+// Returns null whenever the lead could not be stored on the site (not configured, phone not accepted, site down...):
+// the caller then alerts the managers itself. Never throws, never retries (a retry could create a duplicate lead).
+export async function submitSiteLead(input: LeadInput, opts: { fetch?: Fetch } = {}): Promise<SiteLead | null> {
+  const key = siteApiKey();
+  if (!key) return null;
+  const phone = normalizeUzbekPhone(input.phone);
+  const name = clip(input.name, 160);
+  if (!phone || name.length < 2) return null;
+
+  // The site validates this strictly (unknown fields are rejected), so only its documented fields are sent
+  const body: Record<string, unknown> = {
+    type: 'chat',
+    name,
+    phone,
+    locale: input.locale ?? 'uz',
+    attribution: { source: clip(input.source, 100), utm_source: 'ai_assistant', utm_medium: 'chat' },
+  };
+  const optional: Record<string, string> = {
+    city: clip(input.city, 120),
+    organizationName: clip(input.company, 200),
+    note: clip(input.note, 1000),
+    products: clip(input.products, 500),
+  };
+  for (const [field, value] of Object.entries(optional)) if (value) body[field] = value;
+
+  try {
+    const res = await (opts.fetch ?? fetch)(new URL('/api/leads', siteBaseUrl()), {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', Accept: 'application/json', 'User-Agent': 'PaketshopAssistant/1.0' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10000),
+    });
+    const data: any = await res.json().catch(() => null);
+    if (res.status === 201 && isObject(data) && data.success === true && (typeof data.id === 'string' || typeof data.id === 'number')) {
+      return { id: String(data.id), notified: data.notified === true };
+    }
+    console.warn(`Site lead rejected: HTTP ${res.status} ${isObject(data) ? String(data.error ?? '').slice(0, 120) : ''}`);
+    return null;
+  } catch (err) {
+    console.warn('Site lead failed:', String((err as any)?.message || err));
+    return null;
+  }
+}

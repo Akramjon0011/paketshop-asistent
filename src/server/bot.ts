@@ -70,6 +70,7 @@ function describePlan(plan: SyncPlan): string {
   const unpriced = plan.site.products.filter(p => p.price_on_request).length;
   const lines = [
     `📦 paketshop.uz: ${plan.site.products.length} ta mahsulot${unpriced ? ` (${unpriced} tasi narxsiz)` : ''}, ${plan.kbEntries.length} ta ma'lumot bo'limi o'qildi.`,
+    `Mahsulotlar manbasi: ${plan.site.productSource === 'api' ? "sayt API'si (aniq ma'lumot)" : "sayt sahifalari (HTML)"}`,
     `Yangi: ${plan.newProducts.length} · O'zgargan: ${plan.changed.length} · O'zgarmagan: ${plan.unchanged}${plan.contentChanged ? ` · Tavsif/rasm o'zgargan: ${plan.contentChanged}` : ''}`,
     `Bilimlar bazasi: ${plan.kbChanged ? "yangilanadi" : "o'zgarmagan"}${plan.needsWrite ? '' : ' · Qo\'llash kerak emas, hammasi dolzarb.'}`,
   ];

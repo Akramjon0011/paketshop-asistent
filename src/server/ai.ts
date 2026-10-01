@@ -151,7 +151,8 @@ NARXLAR
 - Narx, summa va sonlarni funksiya natijalaridan AYNAN ko'chir: raqamni o'zgartirma, yaxlitlama, o'zing hisoblama. Natijadagi *_text maydonlari tayyor yozilgan (bo'shliqli) ko'rinish, ularni o'zgarishsiz ishlat.
 - Hajmga qarab ulgurji narxlar bor (10, 50 va 100+ qadoq), aniq chegirmani menejer tasdiqlaydi. Chegirma va'da qilma. Mahsulotda volume_prices bo'lsa, faqat shuni ayt.
 - price_on_request true bo'lsa (yoki price_per_pack bo'sh): narxni menejer aniqlashini ayt.
-- availability kodlari: in_stock = omborda mavjud, low_stock = qoldiq kam qolgan, check_with_manager = qoldiqni menejer aniqlaydi. Qoldiqni kafolatlama.
+- availability kodlari: in_stock = omborda mavjud, low_stock = qoldiq kam qolgan, on_order = buyurtma asosida (muddatni menejer aytadi), out_of_stock = vaqtincha yo'q, discontinued = sotuvdan chiqarilgan (o'xshash mahsulot tavsiya qil), check_with_manager = qoldiqni menejer aniqlaydi. Qoldiqni kafolatlama.
+- starting_price true bo'lsa: narx "dan" boshlanadi va variantga qarab o'zgaradi, buni ayt. variants bo'lsa, mavjud rang/o'lcham variantlarini sanab ber; variantning o'z narxi bo'lsa, shuni ayt. order_step_packs bo'lsa, buyurtma miqdori shu qadam bilan oshishini ayt.
 - Funksiya natijalaridagi inglizcha izohlarni (note, notes, manager_reply) mijoz tiliga tarjima qilib ayt.
 - Hisob taxminiy ekanini ayt: yakuniy narx va qoldiqni menejer tasdiqlaydi.
 
@@ -168,7 +169,7 @@ SO'ROV YUBORISH
 - Hammasi to'liq bo'lgach: avval calculate_quote bilan taxminiy jami summani ayt va mijozdan tasdiq ol, keyin create_request ni chaqir.
 - Muvaffaqiyatli bo'lsa: so'rov raqamini ayt va natijadagi manager_reply ma'nosini ayt (menejer qoldiq va yakuniy narxni tasdiqlab bog'lanadi).
 - Bu yakuniy buyurtma emas; to'lov va yetkazishni menejer mijoz bilan kelishadi. Mijozdan karta yoki to'lov ma'lumotini so'rama.
-- Mijoz so'rov raqami bilan holatini so'rasa, check_order_status ni chaqir.
+- Mijoz so'rov raqami bilan holatini so'rasa, so'rov raqamini va so'rovda ko'rsatilgan telefon raqamini so'ra (boshqa odamning ma'lumoti ochilmasligi uchun), keyin check_order_status ni chaqir.
 
 RASM QABUL QILISH
 Mijoz mahsulot rasmini yuborsa (masalan "shundan bormi?"): avval rasmda nima borligini qisqa ayt (turi, rangi, taxminiy hajmi yoki o'lchami, material, qopqoq bor-yo'qligi), keyin search_products bilan katalogdan eng mos 1–3 mahsulotni top. Aniq bir xil ekanini va'da qilma: "o'xshash variant bor, aniq mosligini menejer tasdiqlaydi" de. Katalogda o'xshashi bo'lmasa, buni ochiq ayt va menejerga yo'naltir; menejer rasm bo'yicha topib berishini kafolatlama.
@@ -256,32 +257,57 @@ const createRequestDeclaration = {
 
 const checkOrderStatusDeclaration = {
   name: 'check_order_status',
-  description: "So'rov (buyurtma) raqami orqali holatini tekshirish.",
+  description: "So'rov (buyurtma) holatini tekshirish. So'rov raqami VA so'rovda ko'rsatilgan telefon raqami kerak: telefon mos kelmasa, ma'lumot berilmaydi.",
   parameters: {
     type: 'OBJECT',
     properties: {
-      order_id: { type: 'INTEGER', description: "So'rov raqami" }
+      order_id: { type: 'INTEGER', description: "So'rov raqami" },
+      customer_phone: { type: 'STRING', description: "So'rov berilganda ko'rsatilgan telefon raqami" }
     },
-    required: ['order_id']
+    required: ['order_id', 'customer_phone']
   }
 };
 
-async function dbCheckOrderStatus(order_id: number, db: Sql | null = sql) {
+// A request is shown only to whoever knows the phone number on it: request numbers are sequential and would
+// otherwise let anyone read other customers' names, addresses and items.
+async function dbCheckOrderStatus(order_id: number, customerPhone: unknown, db: Sql | null = sql) {
   if (!db) return { error: "Database not connected" };
+  const given = String(customerPhone ?? '').replace(/\D/g, '');
+  if (given.length < 9) return { error: "Ask the customer for the phone number given in the request; the status is shown only when it matches" };
   try {
     const data = await db`
-      SELECT id, customer_name, delivery_address, items, total_price, status, created_at
+      SELECT id, customer_name, customer_phone, delivery_address, items, total_price, status, created_at
       FROM orders WHERE id = ${order_id}
     `;
-    if (data.length === 0) return { error: `So'rov topilmadi (raqam: ${order_id})` };
-    return { success: true, order: data[0] };
+    // One answer for "no such request" and "wrong phone", so request numbers cannot be probed
+    if (data.length === 0 || String(data[0].customer_phone ?? '').replace(/\D/g, '').slice(-9) !== given.slice(-9)) {
+      return { error: "No request found for this number and phone number" };
+    }
+    const { customer_phone: _phone, ...order } = data[0];
+    return { success: true, order };
   } catch (err) {
     return { error: String(err) };
   }
 }
 
+// What the caller knows about the customer. `language` and `customerName` come from the storefront chat widget.
+export type ChatUserContext = { telegramId?: number; webSessionId?: string; language?: 'uz' | 'ru' | 'en'; customerName?: string };
+
+const LANGUAGE_NAMES = { uz: "o'zbek", ru: 'rus', en: 'ingliz' } as const;
+
+// Extra system-prompt lines from the caller's context (empty for Telegram, where the customer's own words decide the language)
+function clientHints(ctx?: ChatUserContext): string {
+  const lines: string[] = [];
+  if (ctx?.language && ctx.language in LANGUAGE_NAMES) {
+    lines.push(`Mijoz sayt interfeysini ${LANGUAGE_NAMES[ctx.language]} tilida ochgan. Xabarning tili aniq bo'lmasa (bitta so'z, raqam), shu tilda javob ber; aks holda xabar tiliga amal qil.`);
+  }
+  const name = ctx?.customerName?.replace(/\s+/g, ' ').trim().slice(0, 100);
+  if (name) lines.push(`Mijoz o'zini "${name}" deb tanishtirgan.`);
+  return lines.length ? `\n\n${lines.join('\n')}` : '';
+}
+
 // Runs one tool call. Everything goes through the catalog module; the schema is guaranteed before the first query.
-export async function runTool(name: string, args: any, userContext?: { telegramId?: number; webSessionId?: string }, db: Sql | null = sql) {
+export async function runTool(name: string, args: any, userContext?: ChatUserContext, db: Sql | null = sql) {
   if (!db) return { error: "Database not connected" };
   try {
     if (db === sql) await initDb();
@@ -291,7 +317,7 @@ export async function runTool(name: string, args: any, userContext?: { telegramI
       case 'get_product_details': return await getProduct(db, Number(args?.product_id));
       case 'calculate_quote': return await calculateQuote(db, args?.items);
       case 'create_request': return await createRequest(db, args, userContext);
-      case 'check_order_status': return await dbCheckOrderStatus(Number(args?.order_id), db);
+      case 'check_order_status': return await dbCheckOrderStatus(Number(args?.order_id), args?.customer_phone, db);
       default: return { error: "Unknown function" };
     }
   } catch (err) {
@@ -780,7 +806,7 @@ export type ImageAttachment = { data: string; mimeType: string };
 export async function handleConversationalChat(
   message: string,
   history: Array<{ role: 'user' | 'model'; content: string }>,
-  userContext?: { telegramId?: number; webSessionId?: string },
+  userContext?: ChatUserContext,
   onChunk?: (text: string) => void,
   images?: ImageAttachment[]
 ): Promise<string> {
@@ -802,7 +828,7 @@ export async function handleConversationalChat(
     ? `\n\nSUHBATNING AVVALGI QISMI XULOSASI (eslab qoling, lekin to'g'ridan-to'g'ri takrorlamang):\n${summary}`
     : "";
 
-  const fullSystemInstruction = `${buildSystemInstruction()}\n\n${ragContext}${catalogContext}${customerContext}${summaryContext}`;
+  const fullSystemInstruction = `${buildSystemInstruction()}${clientHints(userContext)}\n\n${ragContext}${catalogContext}${customerContext}${summaryContext}`;
 
   const contents: any[] = [];
   for (const turn of history) {
@@ -986,7 +1012,7 @@ export async function handleConversationalChat(
 export async function handleConversationalChatStream(
   message: string,
   history: Array<{ role: 'user' | 'model'; content: string }>,
-  userContext: { telegramId?: number; webSessionId?: string } | undefined,
+  userContext: ChatUserContext | undefined,
   onChunk: (text: string) => void,
   images?: ImageAttachment[]
 ): Promise<string> {

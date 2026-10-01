@@ -5,6 +5,17 @@ const SITE = 'https://www.paketshop.uz';
 
 export type PriceTier = { from: number; to: number | null; unit: string; price: number };
 
+export type ProductVariant = {
+  sku: string;
+  color: string | null;
+  size: string | null;
+  volume_ml: number | null;
+  thickness_micron: number | null;
+  pieces_per_pack: number | null;
+  price: number | null;
+  availability: string;
+};
+
 export type SiteProduct = {
   url: string;
   sku: string | null;
@@ -26,6 +37,12 @@ export type SiteProduct = {
   price_tiers: PriceTier[];      // volume prices when the site lists them
   stock_note: string | null;     // site wording: "Omborda mavjud" / "Kam qoldi" / "Qoldiqni aniqlang"
   image_url: string | null;
+  // Only filled when the product comes from the storefront API (siteBridge.ts); the HTML reader leaves them out.
+  availability?: string | null;           // in_stock | low_stock | check_with_manager | on_order | out_of_stock | discontinued
+  price_from?: boolean;                   // the price is a starting price ("dan")
+  order_step?: number | null;             // quantities grow in steps of this many packs
+  variants?: ProductVariant[];
+  dimensions?: Record<string, number> | null;   // length_cm, width_cm, height_cm, volume_ml, diameter_mm, thickness_micron
 };
 
 export type SiteSection = { lang: 'uz' | 'ru'; page: string; url: string; question: string; answer: string };
