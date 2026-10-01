@@ -803,8 +803,9 @@ router.get("/admin/analytics", requireAdmin, async (_req, res) => {
         SELECT
           (item->>'product_id')::integer AS product_id,
           (item->>'name') AS name,
-          SUM((item->>'quantity')::integer)::integer AS units_sold,
-          SUM((item->>'quantity')::integer * (item->>'price')::numeric)::numeric AS revenue
+          -- requests from the assistant store packs/line_total; older orders stored quantity/price
+          SUM(COALESCE((item->>'packs')::integer, (item->>'quantity')::integer, 0))::integer AS units_sold,
+          SUM(COALESCE((item->>'line_total')::numeric, (item->>'quantity')::integer * (item->>'price')::numeric, 0))::numeric AS revenue
         FROM orders, jsonb_array_elements(items) AS item
         WHERE status != 'cancelled'
         GROUP BY product_id, name

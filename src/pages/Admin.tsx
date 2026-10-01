@@ -1174,18 +1174,44 @@ export default function Admin() {
                             <span className="font-medium text-gray-700">{order.delivery_address}</span>
                           </div>
                         </div>
+                        {order.notes && (
+                          <p className="text-xs text-gray-600 bg-amber-50/60 border border-amber-100 rounded-lg px-3 py-2 whitespace-pre-line">{order.notes}</p>
+                        )}
+                        {order.site_lead_id && (
+                          <span
+                            title={`paketshop.uz CRM: ${order.site_lead_id}`}
+                            className="inline-block text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full"
+                          >
+                            Sayt CRM'iga yuborilgan
+                          </span>
+                        )}
                       </div>
 
                       {/* Items table */}
                       <div className="w-full lg:w-96 bg-white border border-gray-100 rounded-xl p-4 space-y-3">
                         <span className="text-xs font-bold text-gray-400 block border-b pb-1.5 uppercase">Sotib olingan narsalar</span>
                         <div className="space-y-2 max-h-32 overflow-y-auto">
-                          {order.items.map((item: any, idx: number) => (
-                            <div key={idx} className="flex justify-between items-center text-xs">
-                              <span className="text-gray-700 font-medium">{item.name} <span className="text-gray-400 font-semibold">x {item.quantity}</span></span>
-                              <span className="font-bold text-gray-900">{(Number(item.price) * item.quantity).toLocaleString()} so'm</span>
-                            </div>
-                          ))}
+                          {(Array.isArray(order.items) ? order.items : []).map((item: any, idx: number) => {
+                            // Requests from the assistant store packs/unit/line_total; older orders stored quantity/price
+                            const qty = item.packs != null
+                              ? `${item.packs} ${item.unit || 'qadoq'}${item.pieces ? ` (${Number(item.pieces).toLocaleString()} dona)` : ''}`
+                              : `x ${item.quantity ?? 1}`;
+                            const sum = item.packs != null
+                              ? item.line_total
+                              : (item.price != null ? Number(item.price) * Number(item.quantity ?? 1) : null);
+                            return (
+                              <div key={idx} className="flex justify-between items-start gap-3 text-xs">
+                                <span className="text-gray-700 font-medium">
+                                  {item.name}
+                                  {item.sku && <span className="text-gray-400"> [{item.sku}]</span>}
+                                  {' '}<span className="text-gray-500 font-semibold whitespace-nowrap">{qty}</span>
+                                </span>
+                                <span className="font-bold text-gray-900 whitespace-nowrap">
+                                  {sum == null || Number.isNaN(Number(sum)) ? 'narxi aniqlanadi' : `${Number(sum).toLocaleString()} so'm`}
+                                </span>
+                              </div>
+                            );
+                          })}
                         </div>
                         <div className="border-t pt-2 flex justify-between items-center text-sm">
                           <span className="font-extrabold text-gray-800">JAMI SUMMA:</span>
