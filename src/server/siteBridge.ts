@@ -219,6 +219,53 @@ export async function fetchSiteCatalog(opts: { fetch?: Fetch } = {}): Promise<{ 
   throw new Error('site catalog API: too many pages');
 }
 
+// ---------- diagnostics ----------
+
+export type BridgeStatus = {
+  configured: boolean;   // ASSISTANT_API_KEY is set here
+  site: string;
+  catalog?: { ok: boolean; status: number; hint?: string };
+};
+
+const STATUS_HINTS: Record<number, string> = {
+  401: "Kalitlar mos emas: ikkala Vercel loyihasida ASSISTANT_API_KEY bir xil bo'lishi kerak (keyin ikkalasini redeploy qiling).",
+  404: "Saytda katalog API'si yo'q: integratsiya PR'i hali merge yoki deploy qilinmagan.",
+  503: "Saytda ASSISTANT_API_KEY o'rnatilmagan (yoki 24 belgidan qisqa), yoki o'rnatilgandan keyin sayt redeploy qilinmagan.",
+};
+
+let statusCache: { at: number; value: BridgeStatus } | null = null;
+
+// Is the link to the storefront working? Reads one product with the shared key; only the outcome is reported, never data.
+export async function checkSiteBridge(opts: { fetch?: Fetch; fresh?: boolean } = {}): Promise<BridgeStatus> {
+  if (!opts.fresh && statusCache && Date.now() - statusCache.at < 30000) return statusCache.value;
+  const key = siteApiKey();
+  const site = siteBaseUrl();
+  let value: BridgeStatus;
+  if (!key) {
+    value = { configured: false, site };
+  } else {
+    try {
+      const url = new URL('/api/assistant/catalog', site);
+      url.searchParams.set('limit', '1');
+      const res = await (opts.fetch ?? fetch)(url, {
+        headers: { Authorization: `Bearer ${key}`, Accept: 'application/json', 'User-Agent': 'PaketshopAssistant/1.0' },
+        signal: AbortSignal.timeout(10000),
+      });
+      const data: any = await res.json().catch(() => null);
+      const ok = res.ok && isObject(data) && Array.isArray(data.products);
+      value = {
+        configured: true,
+        site,
+        catalog: { ok, status: res.status, ...(ok ? {} : { hint: STATUS_HINTS[res.status] ?? `Sayt kutilmagan javob qaytardi (HTTP ${res.status}).` }) },
+      };
+    } catch (err) {
+      value = { configured: true, site, catalog: { ok: false, status: 0, hint: `Saytga ulanib bo'lmadi: ${String((err as any)?.message || err).slice(0, 120)}` } };
+    }
+  }
+  statusCache = { at: Date.now(), value };
+  return value;
+}
+
 // ---------- requests -> site CRM ----------
 
 // Same rule as the site's normalizeUzbekPhone: "+998" + 9 digits, anything else is not accepted by its lead API

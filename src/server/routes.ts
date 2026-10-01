@@ -4,7 +4,7 @@ import { v2 as cloudinary } from 'cloudinary';
 import { sql, initDb } from './db.js';
 import { generateEmbedding, generateEmbeddingsBatch, searchKnowledgeBase, handleConversationalChat, handleConversationalChatStream, transcribeAudio, generateSpeech, generateSpeechDetailed, TTS_MODELS, BRAND, BRAND_GREETING, appendHistory, type ChatUserContext } from './ai.js';
 import { runScheduledSync } from './scheduledSync.js';
-import { bridgeEnabled, hasSiteKey, rateLimitKey } from './siteBridge.js';
+import { bridgeEnabled, checkSiteBridge, hasSiteKey, rateLimitKey } from './siteBridge.js';
 import { timingSafeEqual } from 'crypto';
 import { GoogleGenAI } from "@google/genai";
 import { createRequire } from 'module';
@@ -98,6 +98,11 @@ const apiLimiter = rateLimit({
 });
 
 router.use(apiLimiter);
+
+// Is the link to paketshop.uz working (shared key, site API deployed)? Status only, no data; cached for 30 s.
+router.get("/site-bridge", async (_req, res) => {
+  res.json(await checkSiteBridge());
+});
 
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
