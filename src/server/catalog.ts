@@ -31,10 +31,34 @@ function availability(r: Row): string {
 // "3850000" -> "3 850 000": ready-to-copy text, so the model doesn't have to regroup digits (where it once slipped)
 const grouped = (n: number | null) => (n === null || !Number.isFinite(n) ? undefined : n.toLocaleString('en-US').replace(/,/g, ' '));
 
+// "Shaffof · 80 ml · 40 mkm": what tells one variant of a product from another
+function variantOption(v: Row): string {
+  return [v.color, v.size, v.volume_ml ? `${v.volume_ml} ml` : null, v.thickness_micron ? `${v.thickness_micron} mkm` : null]
+    .filter(Boolean).join(' · ') || String(v.sku);
+}
+
+// Variants can differ in pieces per pack and price (sauce cups: 20 ml = 2 000 pcs, 80 ml = 600 pcs per pack)
+function variantView(v: Row, priceOnRequest: boolean) {
+  const price = priceOnRequest ? null : num(v.price);
+  const pieces = num(v.pieces_per_pack);
+  return {
+    sku: v.sku,
+    option: variantOption(v),
+    pieces_per_pack: pieces ?? undefined,
+    pieces_per_pack_text: grouped(pieces),
+    price_per_pack: price ?? undefined,
+    price_per_pack_text: grouped(price),
+    availability: AVAILABILITY_CODES.has(v.availability) ? v.availability : 'check_with_manager',
+  };
+}
+
+const variantsOf = (r: Row): Row[] => (Array.isArray(r.variants) ? r.variants : []);
+
 function compact(r: Row) {
   const price = r.price_on_request ? null : num(r.price);
   const perPiece = r.price_on_request ? null : num(r.unit_price);
   const pieces = num(r.pack_qty);
+  const variants = variantsOf(r);
   return {
     id: r.id,
     sku: r.sku,
@@ -51,12 +75,13 @@ function compact(r: Row) {
     approx_price_per_piece: perPiece,
     approx_price_per_piece_text: grouped(perPiece),
     availability: availability(r),
+    variants: variants.length ? variants.slice(0, 8).map(v => variantView(v, !!r.price_on_request)) : undefined,
   };
 }
 
 function detailed(r: Row) {
   const tiers = Array.isArray(r.price_tiers) ? r.price_tiers : [];
-  const variants = Array.isArray(r.variants) ? r.variants : [];
+  const variants = variantsOf(r);
   const dimensions = r.dimensions && typeof r.dimensions === 'object' && Object.keys(r.dimensions).length ? r.dimensions : undefined;
   return {
     ...compact(r),
@@ -67,7 +92,7 @@ function detailed(r: Row) {
     packs_per_box: num(r.packs_per_box),
     pieces_per_box: num(r.box_qty),
     dimensions,
-    variants: variants.length ? variants.map((v: Row) => ({ ...v, price_text: grouped(num(v.price)) })) : undefined,
+    variants: variants.length ? variants.map(v => variantView(v, !!r.price_on_request)) : undefined,
     volume_prices: tiers.length ? tiers : undefined,
     volume_prices_note: tiers.length ? "Only for these quantity ranges; for other quantities the manager sets the price" : undefined,
     product_page: r.url || undefined,
@@ -107,10 +132,10 @@ export function queryTokens(query: string): string[] {
 export async function listProducts(db: Sql, category?: string) {
   const cat = category?.trim();
   const rows = cat
-    ? await db`SELECT id, sku, name, name_ru, category, price, price_on_request, price_from, pack_unit, pack_qty, unit_price, stock_note, availability
+    ? await db`SELECT id, sku, name, name_ru, category, price, price_on_request, price_from, pack_unit, pack_qty, unit_price, stock_note, availability, variants
                FROM products WHERE active AND (category ILIKE ${'%' + escapeLike(cat) + '%'} OR category_ru ILIKE ${'%' + escapeLike(cat) + '%'})
                ORDER BY category, id`
-    : await db`SELECT id, sku, name, name_ru, category, price, price_on_request, price_from, pack_unit, pack_qty, unit_price, stock_note, availability
+    : await db`SELECT id, sku, name, name_ru, category, price, price_on_request, price_from, pack_unit, pack_qty, unit_price, stock_note, availability, variants
                FROM products WHERE active ORDER BY category, id`;
   const counts = new Map<string, number>();
   for (const r of rows) counts.set(r.category ?? '-', (counts.get(r.category ?? '-') ?? 0) + 1);
@@ -132,7 +157,7 @@ export async function searchProducts(db: Sql, query: string, opts: { minScore?: 
   const patterns = tokens.map(t => `%${escapeLike(t)}%`);
   const rows = await db`
     SELECT * FROM (
-      SELECT id, sku, name, name_ru, category, price, price_on_request, price_from, pack_unit, pack_qty, unit_price, stock_note, availability,
+      SELECT id, sku, name, name_ru, category, price, price_on_request, price_from, pack_unit, pack_qty, unit_price, stock_note, availability, variants,
         (SELECT COUNT(*) FROM unnest(${patterns}::text[]) AS p
           WHERE (coalesce(sku, '') || ' ' || name || ' ' || coalesce(name_ru, '') || ' ' || coalesce(category, '') || ' ' || coalesce(category_ru, '')
                  || ' ' || (CASE WHEN ${nameOnly}::boolean THEN '' ELSE coalesce(description, '') || ' ' || coalesce(description_ru, '') END)) ILIKE p) AS score
@@ -153,7 +178,7 @@ export async function getProduct(db: Sql, id: number) {
 
 // ---------- quotes ----------
 
-export type QuoteInput = { product_id: number; packs: number };
+export type QuoteInput = { product_id: number; packs: number; variant_sku?: string };
 
 type Tier = { from: number; to: number | null; unit?: string; price: number };
 
@@ -169,20 +194,33 @@ export async function calculateQuote(db: Sql, items: QuoteInput[]) {
     const id = Number(item?.product_id);
     if (!Number.isInteger(id) || !Number.isInteger(packs) || packs < 1 || packs > 100000) return { error: "Invalid product id or number of packs" };
     const rows = await db`SELECT id, sku, name, price, price_on_request, price_from, pack_unit, pack_qty, pack_qty_unit, min_order, order_step,
-                            price_tiers, stock_note, availability
+                            price_tiers, stock_note, availability, variants
                           FROM products WHERE id = ${id} AND active`;
     const p = rows[0];
     if (!p) return { error: `Product not found (id ${id})` };
 
+    // A chosen variant brings its own pieces per pack (and price, when it has one)
+    const variants = variantsOf(p);
+    const wanted = typeof item?.variant_sku === 'string' ? item.variant_sku.trim().toLowerCase() : '';
+    const variant = wanted ? variants.find(v => String(v.sku).toLowerCase() === wanted) : undefined;
+    if (wanted && !variant) return { error: `Variant ${item.variant_sku} not found for product ${id}: use a sku from the product's variants list` };
+    const name = variant ? `${p.name} — ${variantOption(variant)}` : p.name;
+    const sku = variant?.sku ?? p.sku;
+    const packQty = num(variant?.pieces_per_pack) ?? num(p.pack_qty);
+    const variantsDiffer = !variant && new Set(variants.map(v => `${v.pieces_per_pack}|${v.price}`)).size > 1;
+    const variantNote = variantsDiffer ? "This product has variants with different pack sizes or prices: ask which one and pass its variant_sku" : undefined;
+
     const unit = p.pack_unit || 'qadoq';
-    const pieces = p.pack_qty ? Number(p.pack_qty) * packs : null;
-    if (p.price_on_request || !(Number(p.price) > 0)) {
-      unpriced.push(p.name);
-      lines.push({ product_id: p.id, sku: p.sku, name: p.name, packs, unit, pieces, price_per_pack: null, line_total: null, note: "Price on request: the manager sets it" });
+    const pieces = packQty ? packQty * packs : null;
+    const ownPrice = num(variant?.price) ?? num(p.price);
+    if (p.price_on_request || !(Number(ownPrice) > 0)) {
+      unpriced.push(name);
+      lines.push({ product_id: p.id, sku, name, packs, unit, pieces, pieces_text: grouped(pieces), price_per_pack: null, line_total: null,
+        note: ["Price on request: the manager sets it", variantNote].filter(Boolean).join('; ') });
       continue;
     }
 
-    let price = Number(p.price);
+    let price = Number(ownPrice);
     let tierApplied: Tier | null = null;
     const tiers: Tier[] = Array.isArray(p.price_tiers) ? p.price_tiers : [];
     for (const t of tiers) {
@@ -195,16 +233,17 @@ export async function calculateQuote(db: Sql, items: QuoteInput[]) {
     if (p.min_order && packs < Number(p.min_order)) lineNotes.push(`Minimum order is ${p.min_order} ${unit}`);
     const step = Number(p.order_step);
     if (step > 1 && (packs - (Number(p.min_order) || 1)) % step !== 0) lineNotes.push(`This product is ordered in steps of ${step} ${unit} (from ${Number(p.min_order) || 1}): the manager adjusts the quantity`);
-    const stock = availability(p);
+    const stock = variant ? variantView(variant, false).availability : availability(p);
     if (stock === 'out_of_stock') lineNotes.push("Currently out of stock: the manager will say when it is available again");
     else if (stock === 'discontinued') lineNotes.push("This product is no longer sold: suggest an alternative");
     else if (stock === 'on_order') lineNotes.push("Made to order: the manager confirms the lead time");
-    if (p.price_from) lineNotes.push("This is a starting price (from): the manager confirms the exact price for the chosen variant");
+    if (p.price_from && !num(variant?.price)) lineNotes.push("This is a starting price (from): the manager confirms the exact price for the chosen variant");
+    if (variantNote) lineNotes.push(variantNote);
 
     const lineTotal = price * packs;
     total += lineTotal;
     lines.push({
-      product_id: p.id, sku: p.sku, name: p.name, packs, unit, pieces, price_per_pack: price, line_total: lineTotal,
+      product_id: p.id, sku, name, packs, unit, pieces, price_per_pack: price, line_total: lineTotal,
       pieces_text: grouped(pieces), price_per_pack_text: grouped(price), line_total_text: grouped(lineTotal),
       note: lineNotes.join('; ') || undefined,
     });

@@ -152,7 +152,8 @@ NARXLAR
 - Hajmga qarab ulgurji narxlar bor (10, 50 va 100+ qadoq), aniq chegirmani menejer tasdiqlaydi. Chegirma va'da qilma. Mahsulotda volume_prices bo'lsa, faqat shuni ayt.
 - price_on_request true bo'lsa (yoki price_per_pack bo'sh): narxni menejer aniqlashini ayt.
 - availability kodlari: in_stock = omborda mavjud, low_stock = qoldiq kam qolgan, on_order = buyurtma asosida (muddatni menejer aytadi), out_of_stock = vaqtincha yo'q, discontinued = sotuvdan chiqarilgan (o'xshash mahsulot tavsiya qil), check_with_manager = qoldiqni menejer aniqlaydi. Qoldiqni kafolatlama.
-- starting_price true bo'lsa: narx "dan" boshlanadi va variantga qarab o'zgaradi, buni ayt. variants bo'lsa, mavjud rang/o'lcham variantlarini sanab ber; variantning o'z narxi bo'lsa, shuni ayt. order_step_packs bo'lsa, buyurtma miqdori shu qadam bilan oshishini ayt.
+- starting_price true bo'lsa: narx "dan" boshlanadi va variantga qarab o'zgaradi, buni ayt. order_step_packs bo'lsa, buyurtma miqdori shu qadam bilan oshishini ayt.
+- variants bo'lsa: har bir variantning (option) qadoqdagi donasi, narxi va holati alohida bo'lishi mumkin, so'ralsa har birini o'z raqami bilan ayt (umumiy pieces_per_pack ni hamma variantga tarqatma). Mijoz variantni tanlasa, calculate_quote va create_request da shu variantning sku sini variant_sku ga yoz.
 - Funksiya natijalaridagi inglizcha izohlarni (note, notes, manager_reply) mijoz tiliga tarjima qilib ayt.
 - Hisob taxminiy ekanini ayt: yakuniy narx va qoldiqni menejer tasdiqlaydi.
 
@@ -225,7 +226,8 @@ const quoteItemsSchema = {
     type: 'OBJECT',
     properties: {
       product_id: { type: 'INTEGER', description: 'Mahsulot id raqami' },
-      packs: { type: 'INTEGER', description: "Nechta qadoq (yoki korobka) kerak" }
+      packs: { type: 'INTEGER', description: "Nechta qadoq (yoki korobka) kerak" },
+      variant_sku: { type: 'STRING', description: "Mahsulotda variants bo'lsa: mijoz tanlagan variantning sku si (ixtiyoriy)" }
     },
     required: ['product_id', 'packs']
   }
