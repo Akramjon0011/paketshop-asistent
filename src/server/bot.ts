@@ -5,6 +5,7 @@ import { adminChatIds } from './notify.js';
 import { recordEvent as recordBotEvent, readEvents } from './events.js';
 import { planCatalogSync, applyCatalogSync, type SyncPlan } from './catalog.js';
 import { formatGapList, gapGroups } from './gaps.js';
+import { examSummary, runExam, saveExam } from './exam.js';
 import { Mp3Encoder } from '@breezystack/lamejs';
 import { createHash } from 'crypto';
 
@@ -219,6 +220,22 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
         : "So'nggi 30 kunda javobsiz savollar yo'q. 👍");
     } catch (err: any) {
       await ctx.reply(`Xatolik: ${describeErr(err).slice(0, 200)}`);
+    }
+  });
+
+  // Managers only: run the quality exam now (typical customer questions, answers checked automatically).
+  // Kept under ~50 s so Telegram does not resend the update while it runs.
+  bot.command('exam', async (ctx) => {
+    if (!adminChatIds().includes(String(ctx.from.id))) return;
+    try {
+      if (!sql) { await ctx.reply("Ma'lumotlar bazasi ulanmagan."); return; }
+      await initDb();
+      await ctx.reply("🧪 Sifat imtihoni boshlandi: 20 ta savol, taxminan 1 daqiqa...");
+      const report = await runExam(sql, { concurrency: 5, budgetMs: 45_000 });
+      await saveExam(sql, report);
+      await ctx.reply(examSummary(report, 12));
+    } catch (err: any) {
+      await ctx.reply(`Imtihonda xatolik: ${describeErr(err).slice(0, 200)}`);
     }
   });
 

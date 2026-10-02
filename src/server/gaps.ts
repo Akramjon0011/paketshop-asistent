@@ -132,7 +132,13 @@ const DIGEST_KEY = 'gap_digest_at';
 const WEEK_MS = 7 * 24 * 3600 * 1000;
 
 // Called by the daily cron: sends the report once a week. The first call only starts the weekly rhythm.
-export async function maybeSendWeeklyDigest(db: Sql, send: (text: string) => Promise<void>, now = Date.now()): Promise<boolean> {
+// `extra` adds a section that is only worth producing when a report goes out (the weekly quality exam).
+export async function maybeSendWeeklyDigest(
+  db: Sql,
+  send: (text: string) => Promise<void>,
+  now = Date.now(),
+  extra?: () => Promise<string | null>,
+): Promise<boolean> {
   const rows = await db`SELECT value FROM app_settings WHERE key = ${DIGEST_KEY}`;
   const last = Number(rows[0]?.value ?? 0);
   const remember = () => db`INSERT INTO app_settings (key, value, updated_at) VALUES (${DIGEST_KEY}, ${String(now)}, CURRENT_TIMESTAMP)
@@ -142,7 +148,14 @@ export async function maybeSendWeeklyDigest(db: Sql, send: (text: string) => Pro
     return false;
   }
   if (now - last < WEEK_MS - 3 * 3600 * 1000) return false;   // a few hours of slack: the cron does not fire at the same second
-  await send(await weeklyDigestText(db));
+  let section: string | null = null;
+  try {
+    section = extra ? await extra() : null;
+  } catch (extraErr) {
+    section = `⚠️ Qo'shimcha bo'lim tayyorlanmadi: ${String((extraErr as any)?.message || extraErr).slice(0, 120)}`;
+  }
+  const report = await weeklyDigestText(db);
+  await send(section ? `${report}\n\n${section}`.slice(0, 4000) : report);
   await remember();
   return true;
 }

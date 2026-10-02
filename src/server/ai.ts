@@ -47,6 +47,19 @@ function availableModels(models: (string | undefined)[]): string[] {
   return ready.length ? ready : all;
 }
 
+// Which model actually answered (per server instance): the quality exam reports how often the primary model was
+// unavailable (quota, overload) and a backup answered instead
+export const geminiStats = { primary: 0, fallback: 0, quota: 0, overloaded: 0, timeouts: 0 };
+function countAnswer(requested: string | undefined, used: string) {
+  if (used === requested) geminiStats.primary++;
+  else geminiStats.fallback++;
+}
+function countFailure(err: unknown, timedOut: boolean) {
+  if (timedOut) geminiStats.timeouts++;
+  else if (isQuotaError(err)) geminiStats.quota++;
+  else if (isOverloaded(err)) geminiStats.overloaded++;
+}
+
 // Remember Gemini problems (quota, timeouts) where /api/telegram-status can show them
 const noteGeminiProblem = (kind: string, model: string, err: unknown) =>
   recordEvent(kind, `${model}: ${String((err as any)?.message || err).replace(/\s+/g, ' ').slice(0, 480)}`, 'gemini_events');
@@ -62,9 +75,12 @@ export async function generateContentResilient(params: Parameters<typeof ai.mode
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), GEMINI_CALL_TIMEOUT_MS);
       try {
-        return await ai.models.generateContent({ ...params, model, config: { ...params.config, abortSignal: controller.signal } });
+        const result = await ai.models.generateContent({ ...params, model, config: { ...params.config, abortSignal: controller.signal } });
+        countAnswer(params.model, model);
+        return result;
       } catch (err) {
         lastErr = err;
+        countFailure(err, controller.signal.aborted);
         if (controller.signal.aborted) {
           console.warn(`Gemini ${model} timed out after ${GEMINI_CALL_TIMEOUT_MS}ms, switching model`);
           await noteGeminiProblem('gemini_timeout', model, `no answer within ${GEMINI_CALL_TIMEOUT_MS}ms`);
@@ -101,9 +117,12 @@ export async function generateContentStreamResilient(params: Parameters<typeof a
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), GEMINI_CALL_TIMEOUT_MS); // cleared as soon as the stream has started
       try {
-        return await ai.models.generateContentStream({ ...params, model, config: { ...params.config, abortSignal: controller.signal } });
+        const stream = await ai.models.generateContentStream({ ...params, model, config: { ...params.config, abortSignal: controller.signal } });
+        countAnswer(params.model, model);
+        return stream;
       } catch (err) {
         lastErr = err;
+        countFailure(err, controller.signal.aborted);
         if (controller.signal.aborted) {
           console.warn(`Gemini stream ${model} timed out after ${GEMINI_CALL_TIMEOUT_MS}ms, switching model`);
           await noteGeminiProblem('gemini_timeout', model, `stream did not start within ${GEMINI_CALL_TIMEOUT_MS}ms`);
@@ -312,7 +331,13 @@ async function dbCheckOrderStatus(order_id: number, customerPhone: unknown, db: 
 }
 
 // What the caller knows about the customer. `language` and `customerName` come from the storefront chat widget.
-export type ChatUserContext = { telegramId?: number; webSessionId?: string; language?: 'uz' | 'ru' | 'en'; customerName?: string };
+export type ChatUserContext = {
+  telegramId?: number;
+  webSessionId?: string;
+  language?: 'uz' | 'ru' | 'en';
+  customerName?: string;
+  exam?: boolean;   // a quality-exam question: nothing is recorded (no history, no unanswered-question entries)
+};
 
 const LANGUAGE_NAMES = { uz: "o'zbek", ru: 'rus', en: 'ingliz' } as const;
 
@@ -892,7 +917,7 @@ export async function handleConversationalChat(
   const gaps: Gap[] = [];
   const finishTurn = async (answerTopics: string[]) => {
     answerTopics.forEach(topic => gaps.push(gapFromTag(topic)));
-    if (!gaps.length || !sql) return;
+    if (!gaps.length || !sql || userContext?.exam) return;
     try {
       await initDb();
       await recordGaps(sql, gaps, message, channelOf(userContext));

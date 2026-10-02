@@ -6,6 +6,7 @@ import { generateEmbedding, generateEmbeddingsBatch, searchKnowledgeBase, handle
 import { runScheduledSync } from './scheduledSync.js';
 import { catalogTiles } from './catalog.js';
 import { gapGroups, maybeSendWeeklyDigest, resolveGap } from './gaps.js';
+import { examSummary, runExam, saveExam } from './exam.js';
 import { sendToAdmins } from './notify.js';
 import { bridgeEnabled, checkSiteBridge, hasSiteKey, inspectSiteProduct, rateLimitKey } from './siteBridge.js';
 import { timingSafeEqual } from 'crypto';
@@ -59,9 +60,15 @@ router.get("/cron/sync-catalog", async (req, res) => {
   await initDb();
   const sync = await runScheduledSync(sql, { embed: generateEmbeddingsBatch });
   // Once a week the same run sends the managers a short report (conversations, requests, unanswered questions)
+  // together with the quality exam (typical customer questions put to the live assistant and checked)
   let weeklyReport = false;
   try {
-    weeklyReport = await maybeSendWeeklyDigest(sql, text => sendToAdmins(text, true));
+    const db = sql;
+    weeklyReport = await maybeSendWeeklyDigest(db, text => sendToAdmins(text, true), Date.now(), async () => {
+      const exam = await runExam(db);
+      await saveExam(db, exam);
+      return examSummary(exam);
+    });
   } catch (digestErr) {
     console.error("Weekly report failed:", digestErr);
   }
