@@ -376,3 +376,60 @@ export async function submitSiteLead(input: LeadInput, opts: { fetch?: Fetch } =
     return null;
   }
 }
+
+// ---------- request status <- site CRM ----------
+
+export type SiteLeadStatus = { status: string; lostReason: string | null; updatedAt: string | null };
+
+const LEAD_ID = /^[a-z0-9]{8,40}$/i;
+const LEAD_STATUSES = new Set(['NEW', 'CONTACTED', 'IN_PROGRESS', 'WON', 'LOST']);
+const MAX_LEAD_IDS = 50;
+
+// The status the managers set in the site CRM for requests the assistant handed over (GET /api/assistant/leads).
+// Returns whatever could be read: an empty map when not configured, before the site has the endpoint (404) or when the
+// site is down, so callers fall back to what they know themselves. Never throws.
+export async function fetchLeadStatuses(ids: string[], opts: { fetch?: Fetch } = {}): Promise<Map<string, SiteLeadStatus>> {
+  const result = new Map<string, SiteLeadStatus>();
+  const key = siteApiKey();
+  const wanted = [...new Set(ids.map(id => String(id ?? '').trim()).filter(id => LEAD_ID.test(id)))];
+  if (!key || !wanted.length) return result;
+
+  const batches: string[][] = [];
+  for (let i = 0; i < wanted.length && batches.length < 4; i += MAX_LEAD_IDS) batches.push(wanted.slice(i, i + MAX_LEAD_IDS));
+  await Promise.all(batches.map(async batch => {
+    try {
+      const url = new URL('/api/assistant/leads', siteBaseUrl());
+      url.searchParams.set('ids', batch.join(','));
+      const res = await (opts.fetch ?? fetch)(url, {
+        headers: { Authorization: `Bearer ${key}`, Accept: 'application/json', 'User-Agent': 'PaketshopAssistant/1.0' },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) {
+        if (res.status !== 404) console.warn(`Site lead status: HTTP ${res.status}`);
+        return;
+      }
+      const data: any = await res.json().catch(() => null);
+      for (const lead of Array.isArray(data?.leads) ? data.leads : []) {
+        if (!isObject(lead) || typeof lead.id !== 'string' || !batch.includes(lead.id) || !LEAD_STATUSES.has(lead.status)) continue;
+        result.set(lead.id, {
+          status: lead.status,
+          lostReason: typeof lead.lostReason === 'string' && lead.lostReason.trim() ? lead.lostReason.trim().slice(0, 200) : null,
+          updatedAt: typeof lead.updatedAt === 'string' ? lead.updatedAt : null,
+        });
+      }
+    } catch (err) {
+      console.warn('Site lead status failed:', String((err as any)?.message || err));
+    }
+  }));
+  return result;
+}
+
+// Requests handed over to paketshop.uz are worked on in the site CRM: adds the status the managers set there
+// (crm_status, crm_lost_reason, crm_updated_at) to the assistant's own request rows. Rows stay as they are when unknown.
+export async function withCrmStatus<T extends { site_lead_id?: unknown }>(orders: T[], opts: { fetch?: Fetch } = {}): Promise<T[]> {
+  const crm = await fetchLeadStatuses(orders.map(order => String(order.site_lead_id ?? '')).filter(Boolean), opts);
+  return orders.map(order => {
+    const lead = order.site_lead_id ? crm.get(String(order.site_lead_id)) : undefined;
+    return lead ? { ...order, crm_status: lead.status, crm_lost_reason: lead.lostReason, crm_updated_at: lead.updatedAt } : order;
+  });
+}

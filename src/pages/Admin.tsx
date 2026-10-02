@@ -1,11 +1,21 @@
 import { useState, useEffect } from 'react';
-import { Shield, Key, Plus, Trash2, Database, AlertCircle, Loader2, Package, ShoppingBag, Eye, CheckCircle, Clock, Truck, XCircle, Pencil, X, Users, BarChart3, TrendingUp, DollarSign, Upload, ExternalLink, HelpCircle } from 'lucide-react';
+import { Shield, Key, Plus, Trash2, Database, AlertCircle, Loader2, Package, ShoppingBag, Eye, CheckCircle, Clock, Truck, XCircle, Pencil, X, Users, BarChart3, TrendingUp, DollarSign, ExternalLink, HelpCircle } from 'lucide-react';
 
 type Tab = 'analytics' | 'knowledge' | 'products' | 'orders' | 'customers' | 'gaps';
 
 type GapGroup = { kind: string; topic: string; count: number; last_at: string; channels: string[]; questions: string[] };
 
 const CHANNEL_LABELS: Record<string, string> = { telegram: 'Telegram', web: 'Mini App', site: 'Sayt', api: 'API' };
+
+// Lead statuses of the paketshop.uz CRM, worded as on the site's "Leadlar" page
+const CRM_STATUS: Record<string, { label: string; tone: string }> = {
+  NEW: { label: 'Yangi', tone: 'bg-blue-50 text-blue-700 border-blue-100' },
+  CONTACTED: { label: "Bog'lanildi", tone: 'bg-amber-50 text-amber-700 border-amber-100' },
+  IN_PROGRESS: { label: 'Jarayonda', tone: 'bg-purple-50 text-purple-700 border-purple-100' },
+  WON: { label: 'Yutildi', tone: 'bg-green-50 text-green-700 border-green-100' },
+  LOST: { label: "Yo'qotildi", tone: 'bg-red-50 text-red-700 border-red-100' },
+};
+const SITE_ADMIN_URL = 'https://www.paketshop.uz/uz/admin';
 
 type Analytics = {
   totals: { total_orders: number; total_revenue: number; unique_customers: number };
@@ -122,11 +132,6 @@ export default function Admin() {
 
   // --- Products State ---
   const [products, setProducts] = useState<any[]>([]);
-  const [prodName, setProdName] = useState('');
-  const [prodDesc, setProdDesc] = useState('');
-  const [prodPrice, setProdPrice] = useState('');
-  const [prodCategory, setProdCategory] = useState('');
-  const [prodStock, setProdStock] = useState('10');
 
   // --- Orders State ---
   const [orders, setOrders] = useState<any[]>([]);
@@ -347,48 +352,6 @@ export default function Admin() {
   };
 
   // --- Product Actions ---
-  const handleAddProduct = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!prodName.trim() || !prodPrice.trim()) return;
-
-    setIsLoading(true);
-    try {
-      const formData = new FormData();
-      formData.append('name', prodName.trim());
-      formData.append('description', prodDesc.trim());
-      formData.append('price', prodPrice.trim());
-      formData.append('category', prodCategory.trim());
-      formData.append('stock', prodStock.trim());
-
-      const fileInput = (e.target as HTMLFormElement).elements.namedItem('imageFile') as HTMLInputElement;
-      if (fileInput && fileInput.files && fileInput.files[0]) {
-         formData.append('image', fileInput.files[0]);
-      }
-
-      const res = await fetch('/api/admin/products', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` },
-        body: formData
-      });
-
-      if (res.ok) {
-        setProdName('');
-        setProdDesc('');
-        setProdPrice('');
-        setProdCategory('');
-        setProdStock('10');
-        if (fileInput) fileInput.value = '';
-        fetchData();
-      } else {
-        setError('Mahsulotni qo\'shishda xatolik yuz berdi');
-      }
-    } catch (err) {
-      setError('Tarmoq xatosi');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
   const handleDeleteProduct = async (id: number) => {
     if (!window.confirm('Mahsulotni o\'chirmoqchimisiz?')) return;
     try {
@@ -937,139 +900,32 @@ export default function Admin() {
         {/* --- TAB 2: PRODUCTS --- */}
         {activeTab === 'products' && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 animate-fadeIn">
-            {/* Add Product Form */}
+            {/* Products come from the site */}
             <div className="lg:col-span-1">
               <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
                 <div className="p-6 bg-gray-50 border-b border-gray-100">
                   <h2 className="text-lg font-bold text-gray-900 flex items-center">
-                    <Plus className="w-5 h-5 mr-2 text-amber-500" />
-                    Yangi mahsulot qo'shish
+                    <Package className="w-5 h-5 mr-2 text-amber-500" />
+                    Mahsulotlar saytdan olinadi
                   </h2>
                 </div>
-                <form onSubmit={handleAddProduct} className="p-6 space-y-4">
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-1">Mahsulot nomi</label>
-                    <input
-                      type="text"
-                      value={prodName}
-                      onChange={(e) => setProdName(e.target.value)}
-                      className="w-full border border-gray-300 rounded-xl px-3 py-2.5 focus:ring-amber-500 focus:border-amber-500 text-gray-900 bg-white"
-                      placeholder="Masalan: Samarqand noni"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-1">Narxi (so'mda)</label>
-                    <input
-                      type="number"
-                      value={prodPrice}
-                      onChange={(e) => setProdPrice(e.target.value)}
-                      className="w-full border border-gray-300 rounded-xl px-3 py-2.5 focus:ring-amber-500 focus:border-amber-500 text-gray-900 bg-white"
-                      placeholder="Masalan: 15000"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-1">Tavsifi</label>
-                    <textarea
-                      value={prodDesc}
-                      onChange={(e) => setProdDesc(e.target.value)}
-                      className="w-full border border-gray-300 rounded-xl px-3 py-2.5 focus:ring-amber-500 focus:border-amber-500 text-gray-900 bg-white"
-                      rows={3}
-                      placeholder="Mahsulot haqida batafsil..."
-                    />
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-bold text-gray-700 mb-1">Kategoriya</label>
-                      <input
-                        type="text"
-                        value={prodCategory}
-                        onChange={(e) => setProdCategory(e.target.value)}
-                        className="w-full border border-gray-300 rounded-xl px-3 py-2.5 focus:ring-amber-500 focus:border-amber-500 text-gray-900 bg-white"
-                        placeholder="Masalan: Non"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-bold text-gray-700 mb-1">Soni (ombor)</label>
-                      <input
-                        type="number"
-                        value={prodStock}
-                        onChange={(e) => setProdStock(e.target.value)}
-                        className="w-full border border-gray-300 rounded-xl px-3 py-2.5 focus:ring-amber-500 focus:border-amber-500 text-gray-900 bg-white"
-                        placeholder="10"
-                        min="0"
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-1">Rasm yuklash</label>
-                    <input
-                      type="file"
-                      name="imageFile"
-                      accept="image/*"
-                      className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-amber-50 file:text-amber-700 hover:file:bg-amber-100 cursor-pointer"
-                    />
-                  </div>
-                  <button
-                    type="submit"
-                    disabled={isLoading}
-                    className="w-full flex justify-center items-center py-3 px-4 border border-transparent rounded-xl shadow-sm text-sm font-bold text-white bg-amber-500 hover:bg-amber-600 focus:outline-none transition-all disabled:opacity-50"
-                  >
-                    {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : 'Qo\'shish'}
-                  </button>
-                </form>
-              </div>
-
-              {/* CSV Bulk Import */}
-              <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden mt-6">
-                <div className="p-6 bg-amber-50 border-b border-amber-100">
-                  <h2 className="text-lg font-bold text-amber-900 flex items-center">
-                    <Upload className="w-5 h-5 mr-2 text-amber-600" />
-                    CSV import (ko'p mahsulot)
-                  </h2>
-                  <p className="text-xs text-amber-700 mt-1">
-                    Ustunlar: <code className="bg-white px-1 rounded">name,price,description,category,stock,image_url</code> (birinchi qator — sarlavhalar)
+                <div className="p-6 space-y-4 text-sm text-gray-700">
+                  <p>
+                    Katalog paketshop.uz saytidan har kuni 08:00 da (Toshkent vaqti) avtomatik yangilanadi. Malika faqat saytdagi mahsulot, narx va qoldiqni aytadi.
                   </p>
+                  <ul className="list-disc pl-5 space-y-1.5">
+                    <li>Yangi mahsulot qo'shish, narx, rasm yoki tavsifni o'zgartirish — sayt admin panelidagi «Mahsulotlar» bo'limida.</li>
+                    <li>O'zgarish darhol kerak bo'lsa — botda <code className="bg-gray-100 px-1 rounded">/sync</code>, keyin <code className="bg-gray-100 px-1 rounded">/sync apply</code>.</li>
+                  </ul>
+                  <a
+                    href="https://www.paketshop.uz/uz/admin"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-amber-500 hover:bg-amber-600 rounded-xl shadow transition-all"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" /> Sayt admin paneli
+                  </a>
                 </div>
-                <form onSubmit={async (e) => {
-                  e.preventDefault();
-                  const fileInput = (e.target as HTMLFormElement).elements.namedItem('csvFile') as HTMLInputElement;
-                  const file = fileInput.files?.[0];
-                  if (!file) return;
-                  setIsLoading(true);
-                  setError('');
-                  const formData = new FormData();
-                  formData.append('file', file);
-                  try {
-                    const res = await fetch('/api/admin/products/bulk', {
-                      method: 'POST',
-                      headers: { 'Authorization': `Bearer ${token}` },
-                      body: formData
-                    });
-                    const data = await res.json();
-                    if (res.ok) {
-                      fileInput.value = '';
-                      fetchData();
-                      const msg = `${data.inserted}/${data.total} qator qo'shildi.` +
-                        (data.errors?.length ? ` Xatolar: ${data.errors.slice(0, 3).join('; ')}${data.errors.length > 3 ? '...' : ''}` : '');
-                      window.alert(msg);
-                    } else {
-                      setError(data.error || 'Import xatosi');
-                    }
-                  } catch {
-                    setError('Tarmoq xatosi');
-                  } finally {
-                    setIsLoading(false);
-                  }
-                }} className="p-6 space-y-4">
-                  <input type="file" name="csvFile" accept=".csv,text/csv" required
-                    className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-amber-50 file:text-amber-700 hover:file:bg-amber-100 cursor-pointer" />
-                  <button type="submit" disabled={isLoading}
-                    className="w-full flex justify-center items-center py-3 px-4 rounded-xl text-sm font-bold text-amber-700 bg-amber-100 hover:bg-amber-200 disabled:opacity-50">
-                    {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : "CSV yuklash va import qilish"}
-                  </button>
-                </form>
               </div>
             </div>
 
@@ -1231,7 +1087,14 @@ export default function Admin() {
                           <span className="bg-amber-100 text-amber-800 font-black text-sm px-3 py-1 rounded-lg">
                             Order #{order.id}
                           </span>
-                          {getStatusBadge(order.status)}
+                          {order.crm_status && CRM_STATUS[order.crm_status] ? (
+                            <span
+                              title={order.crm_lost_reason ? `Sabab: ${order.crm_lost_reason}` : undefined}
+                              className={`flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full border ${CRM_STATUS[order.crm_status].tone}`}
+                            >
+                              CRM: {CRM_STATUS[order.crm_status].label}
+                            </span>
+                          ) : getStatusBadge(order.status)}
                           <span className="text-xs text-gray-400 font-medium">
                             {new Date(order.created_at).toLocaleString('uz-UZ')}
                           </span>
@@ -1260,6 +1123,7 @@ export default function Admin() {
                             className="inline-block text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full"
                           >
                             Sayt CRM'iga yuborilgan
+                            {order.crm_updated_at && ` · holat ${new Date(order.crm_updated_at).toLocaleString('uz-UZ')}`}
                           </span>
                         )}
                       </div>
@@ -1297,6 +1161,19 @@ export default function Admin() {
                       </div>
 
                       {/* Actions */}
+                      {order.site_lead_id ? (
+                        <div className="flex flex-col gap-2 shrink-0 justify-end lg:w-40">
+                          <a
+                            href={SITE_ADMIN_URL}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center justify-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-amber-500 hover:bg-amber-600 rounded-xl shadow transition-all"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" /> Sayt CRM'i
+                          </a>
+                          <p className="text-[11px] text-gray-500 leading-snug">Holat saytdagi «Leadlar» bo'limida o'zgartiriladi; Malika mijozga shu holatni aytadi.</p>
+                        </div>
+                      ) : (
                       <div className="flex flex-row lg:flex-col gap-2 shrink-0 justify-end">
                         {order.status === 'pending' && (
                           <button
@@ -1323,6 +1200,7 @@ export default function Admin() {
                           </button>
                         )}
                       </div>
+                      )}
 
                     </div>
                   </div>

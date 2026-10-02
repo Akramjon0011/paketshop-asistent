@@ -5,6 +5,7 @@ import { SHOP, shopStatusLine } from './shopInfo.js';
 import { recordEvent } from './events.js';
 import { allowNumbersFromText, collectNumbers, findUnverifiedNumbers, formatAmount } from './numberGuard.js';
 import { channelOf, extractGapTags, gapFromTag, recordGaps, type Gap } from './gaps.js';
+import { fetchLeadStatuses } from './siteBridge.js';
 
 const geminiKey = process.env.GEMINI_API_KEY;
 export const ai = new GoogleGenAI({ apiKey: geminiKey as string });
@@ -206,6 +207,7 @@ SO'ROV YUBORISH
 - Muvaffaqiyatli bo'lsa: so'rov raqamini ayt va natijadagi manager_reply ma'nosini ayt (menejer qoldiq va yakuniy narxni tasdiqlab bog'lanadi).
 - Bu yakuniy buyurtma emas; to'lov va yetkazishni menejer mijoz bilan kelishadi. Mijozdan karta yoki to'lov ma'lumotini so'rama.
 - Mijoz so'rov raqami bilan holatini so'rasa, so'rov raqamini va so'rovda ko'rsatilgan telefon raqamini so'ra (boshqa odamning ma'lumoti ochilmasligi uchun), keyin check_order_status ni chaqir.
+- check_order_status natijasidagi status ma'nosi: pending yoki new — so'rov qabul qilingan, menejer tez orada bog'lanadi; contacted — menejer mijoz bilan bog'langan; in_progress yoki processing — so'rov ustida ishlanmoqda (narx, qoldiq, yetkazish kelishilmoqda); won — kelishildi, buyurtma rasmiylashtirilgan; delivered — topshirilgan; lost yoki cancelled — so'rov yopilgan (xohlasa yangi so'rov qoldirishni yoki menejer bilan bog'lanishni taklif qil). Holatni oddiy so'z bilan ayt, kodni (pending, won...) yozma.
 
 RASM QABUL QILISH
 Mijoz mahsulot rasmini yuborsa (masalan "shundan bormi?"): avval rasmda nima borligini qisqa ayt (turi, rangi, taxminiy hajmi yoki o'lchami, material, qopqoq bor-yo'qligi), keyin search_products bilan katalogdan eng mos 1–3 mahsulotni top. Aniq bir xil ekanini va'da qilma: "o'xshash variant bor, aniq mosligini menejer tasdiqlaydi" de. Katalogda o'xshashi bo'lmasa, buni ochiq ayt va menejerga yo'naltir; menejer rasm bo'yicha topib berishini kafolatlama.
@@ -308,6 +310,9 @@ const checkOrderStatusDeclaration = {
   }
 };
 
+// The site CRM's lead status as the code the prompt explains to the model
+const CRM_STATUS_CODES: Record<string, string> = { NEW: 'new', CONTACTED: 'contacted', IN_PROGRESS: 'in_progress', WON: 'won', LOST: 'lost' };
+
 // A request is shown only to whoever knows the phone number on it: request numbers are sequential and would
 // otherwise let anyone read other customers' names, addresses and items.
 async function dbCheckOrderStatus(order_id: number, customerPhone: unknown, db: Sql | null = sql) {
@@ -316,14 +321,21 @@ async function dbCheckOrderStatus(order_id: number, customerPhone: unknown, db: 
   if (given.length < 9) return { error: "Ask the customer for the phone number given in the request; the status is shown only when it matches" };
   try {
     const data = await db`
-      SELECT id, customer_name, customer_phone, delivery_address, items, total_price, status, created_at
+      SELECT id, customer_name, customer_phone, delivery_address, items, total_price, status, created_at, site_lead_id
       FROM orders WHERE id = ${order_id}
     `;
     // One answer for "no such request" and "wrong phone", so request numbers cannot be probed
     if (data.length === 0 || String(data[0].customer_phone ?? '').replace(/\D/g, '').slice(-9) !== given.slice(-9)) {
       return { error: "No request found for this number and phone number" };
     }
-    const { customer_phone: _phone, ...order } = data[0];
+    const { customer_phone: _phone, site_lead_id: leadId, ...order } = data[0];
+    // Requests handed over to paketshop.uz are worked on in the site CRM: its status is the current one.
+    // (The managers' reason for closing a request is internal and is not passed on.)
+    if (leadId) {
+      const lead = (await fetchLeadStatuses([String(leadId)])).get(String(leadId));
+      const code = lead && CRM_STATUS_CODES[lead.status];
+      if (code) return { success: true, order: { ...order, status: code, status_updated_at: lead.updatedAt } };
+    }
     return { success: true, order };
   } catch (err) {
     return { error: String(err) };

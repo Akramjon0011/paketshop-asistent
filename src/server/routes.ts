@@ -8,7 +8,7 @@ import { catalogTiles } from './catalog.js';
 import { gapGroups, maybeSendWeeklyDigest, resolveGap } from './gaps.js';
 import { examSummary, runExam, saveExam } from './exam.js';
 import { sendToAdmins } from './notify.js';
-import { bridgeEnabled, checkSiteBridge, hasSiteKey, inspectSiteProduct, rateLimitKey } from './siteBridge.js';
+import { bridgeEnabled, checkSiteBridge, hasSiteKey, inspectSiteProduct, rateLimitKey, withCrmStatus } from './siteBridge.js';
 import { timingSafeEqual } from 'crypto';
 import { GoogleGenAI } from "@google/genai";
 import { createRequire } from 'module';
@@ -607,35 +607,11 @@ router.get("/admin/products", requireAdmin, async (req, res) => {
   }
 });
 
-// 3. Admin: Create a new product
-router.post("/admin/products", requireAdmin, uploadImageMemory.single('image'), async (req, res) => {
-  if (!sql) return res.status(500).json({ error: "Database not connected" });
-  const { name, description, price, category, stock } = req.body;
-  if (!name || !price) return res.status(400).json({ error: "Name and Price are required" });
-
-  let image_url = null;
-  if (req.file) {
-    if (!CLOUDINARY_CONFIGURED) {
-      return res.status(500).json({ error: "Rasm yuklash uchun Cloudinary sozlanmagan. CLOUDINARY_* env'larni qo'shing." });
-    }
-    try {
-      image_url = await uploadToCloudinary(req.file.buffer, 'paketshop_products');
-    } catch (err) {
-      console.error("Cloudinary upload failed:", err);
-      return res.status(500).json({ error: "Rasm yuklashda xatolik yuz berdi" });
-    }
-  }
-
-  try {
-    const result = await sql`
-      INSERT INTO products (name, description, price, category, stock, image_url)
-      VALUES (${name}, ${description || null}, ${price}, ${category || null}, ${stock || 10}, ${image_url})
-      RETURNING *
-    `;
-    res.json(result[0]);
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
-  }
+// 3. Admin: products are created on paketshop.uz (the catalogue is synced from the site), not here: a product that
+// exists only in the assistant would be quoted to customers although the site does not sell it.
+const PRODUCTS_FROM_SITE_MESSAGE = "Mahsulotlar paketshop.uz saytidan olinadi. Yangi mahsulotni sayt admin panelida qo'shing, keyin botda /sync apply qiling.";
+router.post("/admin/products", requireAdmin, (_req, res) => {
+  res.status(410).json({ error: PRODUCTS_FROM_SITE_MESSAGE });
 });
 
 // Products imported from paketshop.uz are edited on the site: a change made here would make the assistant quote
@@ -689,81 +665,9 @@ router.put("/admin/products/:id", requireAdmin, uploadImageMemory.single('image'
   }
 });
 
-// 3.6. Admin: Bulk import products from CSV
-// CSV format: name,price,description,category,stock,image_url (first row = headers)
-function parseCSV(text: string): Array<Record<string, string>> {
-  const lines = text.split(/\r?\n/).filter(l => l.trim());
-  if (lines.length < 2) return [];
-
-  const parseRow = (line: string): string[] => {
-    const out: string[] = [];
-    let cur = '';
-    let inQuotes = false;
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-      if (ch === '"') {
-        if (inQuotes && line[i + 1] === '"') { cur += '"'; i++; }
-        else inQuotes = !inQuotes;
-      } else if (ch === ',' && !inQuotes) {
-        out.push(cur); cur = '';
-      } else {
-        cur += ch;
-      }
-    }
-    out.push(cur);
-    return out.map(s => s.trim());
-  };
-
-  const headers = parseRow(lines[0]).map(h => h.toLowerCase());
-  return lines.slice(1).map(line => {
-    const cells = parseRow(line);
-    const row: Record<string, string> = {};
-    headers.forEach((h, i) => row[h] = cells[i] || '');
-    return row;
-  });
-}
-
-router.post("/admin/products/bulk", requireAdmin, uploadImageMemory.single('file'), async (req, res) => {
-  if (!sql) return res.status(500).json({ error: "Database not connected" });
-  if (!req.file) return res.status(400).json({ error: "CSV fayl yuborilmadi" });
-
-  try {
-    const text = req.file.buffer.toString('utf-8');
-    const rows = parseCSV(text);
-    if (rows.length === 0) return res.status(400).json({ error: "CSV bo'sh yoki noto'g'ri formatda" });
-
-    let inserted = 0;
-    const errors: string[] = [];
-
-    for (const [idx, row] of rows.entries()) {
-      const name = row.name?.trim();
-      const priceStr = row.price?.trim();
-      if (!name || !priceStr) {
-        errors.push(`Qator ${idx + 2}: name yoki price yo'q`);
-        continue;
-      }
-      const price = parseFloat(priceStr);
-      if (isNaN(price)) {
-        errors.push(`Qator ${idx + 2}: price raqam emas (${priceStr})`);
-        continue;
-      }
-      const stock = parseInt(row.stock || '10', 10) || 10;
-      try {
-        await sql`
-          INSERT INTO products (name, description, price, category, stock, image_url)
-          VALUES (${name}, ${row.description || null}, ${price}, ${row.category || null}, ${stock}, ${row.image_url || null})
-        `;
-        inserted++;
-      } catch (err) {
-        errors.push(`Qator ${idx + 2}: ${String(err)}`);
-      }
-    }
-
-    res.json({ success: true, inserted, total: rows.length, errors });
-  } catch (err) {
-    console.error("Bulk import error:", err);
-    res.status(500).json({ error: String(err) });
-  }
+// 3.6. Admin: CSV import is retired for the same reason
+router.post("/admin/products/bulk", requireAdmin, (_req, res) => {
+  res.status(410).json({ error: PRODUCTS_FROM_SITE_MESSAGE });
 });
 
 // 4. Admin: Delete a product
@@ -907,7 +811,7 @@ router.get("/admin/orders", requireAdmin, async (req, res) => {
   if (!sql) return res.status(500).json({ error: "Database not connected" });
   try {
     const data = await sql`SELECT * FROM orders ORDER BY created_at DESC`;
-    res.json(data);
+    res.json(await withCrmStatus(data as Array<{ site_lead_id?: unknown }>));
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
