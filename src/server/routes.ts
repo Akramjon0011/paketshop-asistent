@@ -4,6 +4,7 @@ import { v2 as cloudinary } from 'cloudinary';
 import { sql, initDb } from './db.js';
 import { generateEmbedding, generateEmbeddingsBatch, searchKnowledgeBase, handleConversationalChat, handleConversationalChatStream, transcribeAudio, generateSpeech, generateSpeechDetailed, TTS_MODELS, BRAND, BRAND_GREETING, appendHistory, type ChatUserContext } from './ai.js';
 import { runScheduledSync } from './scheduledSync.js';
+import { catalogTiles } from './catalog.js';
 import { bridgeEnabled, checkSiteBridge, hasSiteKey, rateLimitKey } from './siteBridge.js';
 import { timingSafeEqual } from 'crypto';
 import { GoogleGenAI } from "@google/genai";
@@ -102,6 +103,21 @@ router.use(apiLimiter);
 // Is the link to paketshop.uz working (shared key, site API deployed)? Status only, no data; cached for 30 s.
 router.get("/site-bridge", async (_req, res) => {
   res.json(await checkSiteBridge());
+});
+
+// Compact public catalogue for the Mini App (catalogue sheet, product strip, cards under answers).
+// Same data paketshop.uz shows publicly; it changes at most once a day, so browsers and the CDN may cache it briefly.
+router.get("/catalog", async (_req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  try {
+    await initDb();
+    const products = await catalogTiles(sql);
+    res.set('Cache-Control', 'public, max-age=300, s-maxage=600, stale-while-revalidate=3600');
+    res.json({ products });
+  } catch (err) {
+    console.error("Catalog tiles failed:", err);
+    res.status(500).json({ error: "Katalogni yuklab bo'lmadi" });
+  }
 });
 
 const loginLimiter = rateLimit({

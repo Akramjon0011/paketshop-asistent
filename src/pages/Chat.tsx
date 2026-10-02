@@ -1,10 +1,11 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
-import { Send, User, Package, Loader2, Sparkles, Volume2, VolumeX, Mic, Square, Paperclip } from 'lucide-react';
+import { Send, User, Package, Sparkles, Volume2, VolumeX, Mic, Square, Paperclip, LayoutGrid } from 'lucide-react';
 import { generateSpeech } from '../services/geminiService';
-import { formatPrice } from '../lib/format';
-import ProductImage from '../components/ProductImage';
+import { featuredProducts, loadCatalog, type CatalogProduct } from '../lib/catalog';
+import { ProductCardInline, ProductTile } from '../components/ProductTile';
+import CatalogSheet from '../components/CatalogSheet';
 
 type Message = {
   id: string;
@@ -79,6 +80,19 @@ export default function Chat() {
   const [isAudioEnabled, setIsAudioEnabled] = useState(false);
   const [webSessionId, setWebSessionId] = useState('');
   const [isRecording, setIsRecording] = useState(false);
+
+  // Products in small form: the strip before the first message, the catalogue sheet and the card under an answer
+  const [catalog, setCatalog] = useState<CatalogProduct[] | null>(null);
+  const [catalogFailed, setCatalogFailed] = useState(false);
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const fetchCatalog = useCallback(() => {
+    setCatalogFailed(false);
+    loadCatalog().then(setCatalog).catch(() => setCatalogFailed(true));
+  }, []);
+  useEffect(() => { fetchCatalog(); }, [fetchCatalog]);
+  const productsById = useMemo(() => new Map((catalog ?? []).map(p => [p.id, p])), [catalog]);
+  const strip = useMemo(() => featuredProducts(catalog ?? [], 10), [catalog]);
+  const closeCatalog = useCallback(() => setCatalogOpen(false), []);
 
   useEffect(() => {
     fetch('/api/config')
@@ -259,6 +273,14 @@ export default function Chat() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // A tapped product becomes a question to the assistant (it answers with price, pieces, stock and can calculate)
+  const askAbout = (p: CatalogProduct) => {
+    setCatalogOpen(false);
+    const question = `${p.name} haqida ma'lumot bering`;
+    if (isLoading || isRecording) setInput(question);
+    else sendMessageText(question);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -466,16 +488,27 @@ export default function Chat() {
               </p>
             </div>
           </div>
-          <button 
-             onClick={() => {
-                 setIsAudioEnabled(!isAudioEnabled);
-                 if (isAudioEnabled) stopCurrentAudio();
-             }}
-             className="bg-white/20 hover:bg-white/30 p-2 rounded-full transition-colors flex items-center justify-center shrink-0"
-             title={isAudioEnabled ? "Ovozni o'chirish" : "Ovozni yoqish"}
-          >
-             {isAudioEnabled ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5 opacity-70" />}
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setCatalogOpen(true)}
+              className="bg-white/20 hover:bg-white/30 px-3 py-2 rounded-full transition-colors flex items-center gap-1.5 text-sm font-semibold cursor-pointer"
+              title="Mahsulotlar katalogi"
+            >
+              <LayoutGrid className="w-4 h-4" />
+              <span className="max-[360px]:hidden">Katalog</span>
+            </button>
+            <button
+               onClick={() => {
+                   setIsAudioEnabled(!isAudioEnabled);
+                   if (isAudioEnabled) stopCurrentAudio();
+               }}
+               className="bg-white/20 hover:bg-white/30 p-2 rounded-full transition-colors flex items-center justify-center shrink-0"
+               title={isAudioEnabled ? "Ovozni o'chirish" : "Javoblarni ovoz bilan o'qish"}
+            >
+               {isAudioEnabled ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5 opacity-70" />}
+            </button>
+          </div>
         </div>
       </header>
 
@@ -512,15 +545,21 @@ export default function Chat() {
                   </div>
 
                   {message.role === 'model' && getMessageOrderId(message.content) && (
-                    <div className="mt-3.5 pt-3 border-t border-gray-100 flex justify-end">
-                      <button
-                        onClick={() => handleInlineOrderClick(getMessageOrderId(message.content)!)}
-                        className="bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white font-bold text-xs py-2 px-4 rounded-xl shadow transition-all flex items-center gap-1.5 cursor-pointer hover:scale-[1.02]"
-                      >
-                        <Package className="w-3.5 h-3.5" />
-                        Mahsulot sahifasi
-                      </button>
-                    </div>
+                    productsById.get(getMessageOrderId(message.content)!) ? (
+                      <div className="mt-3">
+                        <ProductCardInline product={productsById.get(getMessageOrderId(message.content)!)!} />
+                      </div>
+                    ) : (
+                      <div className="mt-3.5 pt-3 border-t border-gray-100 flex justify-end">
+                        <button
+                          onClick={() => handleInlineOrderClick(getMessageOrderId(message.content)!)}
+                          className="bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white font-bold text-xs py-2 px-4 rounded-xl shadow transition-all flex items-center gap-1.5 cursor-pointer hover:scale-[1.02]"
+                        >
+                          <Package className="w-3.5 h-3.5" />
+                          Mahsulot sahifasi
+                        </button>
+                      </div>
+                    )
                   )}
 
                   {message.isAudioPlaying && (
@@ -551,23 +590,53 @@ export default function Chat() {
         </div>
       </main>
 
-      {/* Suggested questions (only before the conversation starts) */}
+      {/* A few products and suggested questions (only before the conversation starts) */}
       {messages.length <= 1 && !isLoading && (
         <div className="bg-white border-t border-gray-100 px-4 pt-3 pb-2 shrink-0">
-          <div className="w-full max-w-4xl mx-auto flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-            {SUGGESTIONS.map(q => (
-              <button
-                key={q}
-                type="button"
-                onClick={() => sendMessageText(q)}
-                className="shrink-0 text-sm font-medium px-4 py-2 rounded-full bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 transition-colors cursor-pointer"
-              >
-                {q}
-              </button>
-            ))}
+          <div className="w-full max-w-4xl mx-auto space-y-2">
+            {strip.length > 0 && (
+              <>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-gray-500 uppercase tracking-wide">Mahsulotlar</span>
+                  <button
+                    type="button"
+                    onClick={() => setCatalogOpen(true)}
+                    className="text-xs font-semibold text-amber-700 hover:underline cursor-pointer"
+                  >
+                    Barchasi ({catalog?.length ?? strip.length}) →
+                  </button>
+                </div>
+                <div className="flex gap-2.5 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                  {strip.map(p => (
+                    <ProductTile key={p.id} product={p} onAsk={askAbout} className="w-24 sm:w-28 shrink-0" />
+                  ))}
+                </div>
+              </>
+            )}
+            <div className="flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              {SUGGESTIONS.map(q => (
+                <button
+                  key={q}
+                  type="button"
+                  onClick={() => sendMessageText(q)}
+                  className="shrink-0 text-sm font-medium px-4 py-2 rounded-full bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 transition-colors cursor-pointer"
+                >
+                  {q}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       )}
+
+      <CatalogSheet
+        open={catalogOpen}
+        products={catalog}
+        failed={catalogFailed}
+        onRetry={fetchCatalog}
+        onClose={closeCatalog}
+        onAsk={askAbout}
+      />
 
       {/* Input Area */}
       <footer className="bg-white border-t border-gray-200 p-4 shrink-0">
@@ -604,7 +673,7 @@ export default function Chat() {
                   handleSubmit(e);
                 }
               }}
-              placeholder={isRecording ? "Ovoz yozilmoqda... To'xtatish uchun qizil tugmani bosing." : `${brand.assistantName}ga xabar yozing (ovoz bilan javob beradi)...`}
+              placeholder={isRecording ? "Ovoz yozilmoqda... To'xtatish uchun qizil tugmani bosing." : `${brand.assistantName}ga xabar yozing...`}
               disabled={isRecording}
               className="flex-1 max-h-32 min-h-[56px] resize-none bg-gray-50 border border-gray-300 rounded-xl px-4 py-3 sm:py-4 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500 transition-all text-sm sm:text-base text-gray-900 placeholder:text-gray-400 m-0 disabled:bg-gray-100 disabled:text-gray-400"
               rows={1}

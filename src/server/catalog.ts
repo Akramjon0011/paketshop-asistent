@@ -99,6 +99,33 @@ function detailed(r: Row) {
   };
 }
 
+// Small product tile for the Mini App (catalogue sheet, product strip, card under an answer): what paketshop.uz shows publicly
+export function catalogTile(r: Row) {
+  const price = r.price_on_request ? null : num(r.price);
+  return {
+    id: r.id,
+    sku: r.sku,
+    name: r.name,
+    category: r.category ?? null,
+    price,
+    price_from: !!(price && r.price_from),
+    pack_unit: r.pack_unit || 'qadoq',
+    pack_qty: num(r.pack_qty),
+    unit_price: price === null ? null : num(r.unit_price),
+    availability: availability(r),
+    image_url: r.image_url || null,
+    url: r.url || null,
+    variants: variantsOf(r).length,
+  };
+}
+
+export async function catalogTiles(db: Sql) {
+  const rows = await db`SELECT id, sku, name, category, price, price_on_request, price_from, pack_unit, pack_qty, unit_price,
+                          stock_note, availability, image_url, url, variants
+                        FROM products WHERE active ORDER BY category, name`;
+  return rows.map(catalogTile);
+}
+
 // ---------- search ----------
 
 const escapeLike = (s: string) => s.replace(/[\\%_]/g, m => `\\${m}`);

@@ -65,6 +65,22 @@ function describeErr(err: any): string {
   return err?.response?.description ? `${err.response.error_code} ${err.response.description}` : String(err?.message || err);
 }
 
+// The product an answer recommends ([BUYURTMA: id]): its photo and page, so the Telegram reply can show the product.
+// Business chats keep plain text messages.
+async function recommendedProduct(text: string, businessChat: boolean): Promise<{ image: string | null; url: string | null } | null> {
+  const id = /\[BUYURTMA:\s*(\d+)\]/i.exec(text)?.[1];
+  if (!id || !sql || businessChat) return null;
+  try {
+    const rows = await sql`SELECT image_url, url FROM products WHERE id = ${id} AND active`;
+    if (!rows[0]) return null;
+    const https = (u: unknown) => (typeof u === 'string' && u.startsWith('https://') ? u : null);
+    return { image: https(rows[0].image_url), url: https(rows[0].url) };
+  } catch (err) {
+    console.warn("Recommended product lookup failed:", err);
+    return null;
+  }
+}
+
 // Short human-readable summary of what a catalog sync would do
 function describePlan(plan: SyncPlan): string {
   const unpriced = plan.site.products.filter(p => p.price_on_request).length;
@@ -307,6 +323,12 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
          plainText += "\n\nBatafsil video: " + videoUrls.join(", ");
       }
 
+      // A recommended product comes with its photo (as the message itself) and a button to its page on paketshop.uz
+      const recommended = await recommendedProduct(finalResponseText, !!businessConnectionId);
+      const linkButton = recommended?.url
+        ? { reply_markup: { inline_keyboard: [[{ text: "🔗 Saytda ko'rish", url: recommended.url }]] } }
+        : {};
+
       // Send response
       if (imageUrls.length > 0) {
          const firstImage = imageUrls[0];
@@ -315,8 +337,15 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
          } else {
             await ctx.telegram.sendMessage(chatId, plainText, replyOptions);
          }
+      } else if (recommended?.image && plainText.length <= 1024) {   // Telegram's caption limit
+         try {
+            await ctx.telegram.sendPhoto(chatId, recommended.image, { ...replyOptions, caption: plainText, ...linkButton });
+         } catch (photoErr) {
+            console.warn("Product photo failed, sending text instead:", describeErr(photoErr));
+            await ctx.telegram.sendMessage(chatId, plainText, { ...replyOptions, ...linkButton });
+         }
       } else {
-         await ctx.telegram.sendMessage(chatId, plainText, replyOptions);
+         await ctx.telegram.sendMessage(chatId, plainText, { ...replyOptions, ...linkButton });
       }
 
       // Voice answer only to a voice message: a typed question gets text (decided with the shop owner, saves the TTS quota)
