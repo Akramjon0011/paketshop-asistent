@@ -8,7 +8,7 @@ export const sql = process.env.DATABASE_URL ? neon(process.env.DATABASE_URL) : n
 export type Sql = NonNullable<typeof sql>;
 
 // Bump when the DDL below changes; cold starts skip all DDL when the stored version matches.
-const SCHEMA_VERSION = '2026-10-03-conversation-meta-1';
+const SCHEMA_VERSION = '2026-10-03-my-requests-1';
 
 // All DDL for the schema, run as one transaction (one round trip instead of ~30)
 export function schemaStatements(db: Sql) {
@@ -83,6 +83,11 @@ export function schemaStatements(db: Sql) {
     db`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crm_updated_at TIMESTAMPTZ`,
     db`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crm_lost_reason TEXT`,
     db`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crm_checked_at TIMESTAMPTZ`,
+    // Who created the request (Telegram account and/or web session): the customer's "Mening so'rovlarim" list
+    db`ALTER TABLE orders ADD COLUMN IF NOT EXISTS telegram_id BIGINT`,
+    db`ALTER TABLE orders ADD COLUMN IF NOT EXISTS web_session_id TEXT`,
+    db`CREATE INDEX IF NOT EXISTS idx_orders_telegram ON orders(telegram_id, created_at DESC)`,
+    db`CREATE INDEX IF NOT EXISTS idx_orders_web_session ON orders(web_session_id, created_at DESC)`,
 
     // CRM
     db`CREATE TABLE IF NOT EXISTS customers (
@@ -137,6 +142,13 @@ export function schemaStatements(db: Sql) {
       last_summarized_history_id INTEGER,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`,
+
+    // Data fixes, after every table exists.
+    // Older requests without an owner: the customer record saved with the request (same phone) tells whose it was
+    db`UPDATE orders o SET telegram_id = c.telegram_id FROM customers c
+       WHERE o.telegram_id IS NULL AND o.web_session_id IS NULL AND c.telegram_id IS NOT NULL AND c.phone = o.customer_phone`,
+    db`UPDATE orders o SET web_session_id = c.web_session_id FROM customers c
+       WHERE o.telegram_id IS NULL AND o.web_session_id IS NULL AND c.web_session_id IS NOT NULL AND c.phone = o.customer_phone`,
   ];
 }
 

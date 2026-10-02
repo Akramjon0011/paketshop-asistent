@@ -10,6 +10,7 @@ import { Mp3Encoder } from '@breezystack/lamejs';
 import { createHash } from 'crypto';
 import { normalizeUzbekPhone } from './siteBridge.js';
 import { SHOP } from './shopInfo.js';
+import { customerRequests, formatMyRequests } from './myRequests.js';
 
 // Helper to wrap raw 24kHz 16-bit Mono PCM in a standard WAV container for Telegram playback
 function pcmToWav(pcmBuffer: Buffer, sampleRate = 24000, numChannels = 1, bitsPerSample = 16): Buffer {
@@ -93,6 +94,7 @@ const BOT_TEXT = {
     error: "Uzur, texnik xatolik yuz berdi. Iltimos qaytadan urinib ko'ring.",
     openOnSite: "🔗 Saytda ko'rish",
     video: 'Batafsil video: ',
+    myRequests: "📋 Mening so'rovlarim",
     shareContact: '📱 Raqamimni yuborish',
     contactPlaceholder: 'Yoki raqamni yozing',
     leaveRequest: "✅ So'rov qoldirish",
@@ -114,6 +116,7 @@ const BOT_TEXT = {
     error: 'Извините, произошла техническая ошибка. Попробуйте ещё раз.',
     openOnSite: '🔗 Открыть на сайте',
     video: 'Видео: ',
+    myRequests: '📋 Мои заявки',
     shareContact: '📱 Отправить мой номер',
     contactPlaceholder: 'Или напишите номер',
     leaveRequest: '✅ Оставить заявку',
@@ -124,6 +127,50 @@ const BOT_TEXT = {
     contactSaved: (phone: string) => `✅ Номер сохранён: ${phone}. При заявке больше не буду его спрашивать.`,
   },
 };
+
+// The "/" command menu: customers see their requests, a new conversation and the app; admins also the management
+// commands. Descriptions follow the Telegram language. Registered only when this list (or the admin list) changes.
+const CUSTOMER_COMMANDS = {
+  uz: [
+    { command: 'sorovlarim', description: "Mening so'rovlarim va ularning holati" },
+    { command: 'reset', description: 'Yangi suhbat boshlash' },
+    { command: 'webapp', description: 'Yordamchi ilovasini ochish' },
+  ],
+  ru: [
+    { command: 'zayavki', description: 'Мои заявки и их статус' },
+    { command: 'reset', description: 'Начать новый диалог' },
+    { command: 'webapp', description: 'Открыть приложение помощника' },
+  ],
+};
+const ADMIN_COMMANDS = [
+  ...CUSTOMER_COMMANDS.uz,
+  { command: 'sync', description: 'Katalogni saytdan yangilash (/sync apply)' },
+  { command: 'gaps', description: 'Javobsiz savollar' },
+  { command: 'exam', description: 'Sifat imtihoni' },
+  { command: 'id', description: 'Telegram ID' },
+];
+
+async function registerCommands(telegram: Telegraf['telegram']): Promise<void> {
+  const admins = adminChatIds();
+  const key = createHash('sha256').update(JSON.stringify([CUSTOMER_COMMANDS, ADMIN_COMMANDS, admins])).digest('hex').slice(0, 24);
+  if (sql) {
+    const cached = await sql`SELECT value FROM app_settings WHERE key = 'telegram_commands'`;
+    if (cached[0]?.value === key) return;
+  }
+  await telegram.setMyCommands(CUSTOMER_COMMANDS.uz);
+  for (const code of RUSSIAN_SPEAKING) await telegram.setMyCommands(CUSTOMER_COMMANDS.ru, { language_code: code });
+  for (const id of admins) {
+    try {
+      await telegram.setMyCommands(ADMIN_COMMANDS, { scope: { type: 'chat', chat_id: Number(id) } });
+    } catch (err) {
+      console.warn(`Admin command menu for ${id} failed (has the admin started the bot?):`, describeErr(err));
+    }
+  }
+  if (sql) {
+    await sql`INSERT INTO app_settings (key, value, updated_at) VALUES ('telegram_commands', ${key}, CURRENT_TIMESTAMP)
+              ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP`;
+  }
+}
 
 // The product an answer recommends ([BUYURTMA: id]): its photo and page, so the Telegram reply can show the product.
 // Business chats keep plain text messages.
@@ -268,6 +315,26 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
     await ctx.reply(BOT_TEXT[langOf(ctx.from?.language_code)].reset);
   });
 
+  // The customer's own requests and their status (no phone needed: the Telegram account is the proof). Private chats only.
+  const showMyRequests = async (ctx: any) => {
+    if (!ctx.from || ctx.chat?.type !== 'private') return;
+    const lang = langOf(ctx.from.language_code);
+    try {
+      if (!sql) throw new Error('Database not connected');
+      await initDb();
+      const list = await customerRequests(sql, { telegramId: ctx.from.id });
+      await ctx.reply(formatMyRequests(list, lang, { uz: BRAND.assistantName, ru: BRAND.assistantNameRu }));
+    } catch (err) {
+      console.error("My requests failed:", err);
+      await ctx.reply(BOT_TEXT[lang].error);
+    }
+  };
+  bot.command(['sorovlarim', 'zayavki'], showMyRequests);
+  bot.action('myreq', async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    await showMyRequests(ctx);
+  });
+
   const getWebAppButton = (text: string, url: string) => {
     return url.startsWith('https://') 
       ? Markup.button.webApp(text, url)
@@ -293,7 +360,8 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
     try {
       if (appUrl.startsWith('https://')) {
         await ctx.reply(welcomeText, Markup.inlineKeyboard([
-          [getWebAppButton(text.openApp, appUrl)]
+          [getWebAppButton(text.openApp, appUrl)],
+          [Markup.button.callback(text.myRequests, 'myreq')]
         ]));
       } else {
         // http:// URL — Telegram rejects inline URL buttons for non-HTTPS, send plain text
@@ -667,11 +735,14 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
               console.error("❌ Failed to set webhook:", describeErr(err));
             }
           })();
+          // The command menu has its own change check (the webhook block above returns early when nothing changed)
+          registerCommands(bot.telegram).catch(err => console.error("❌ Failed to set the command menu:", describeErr(err)));
       } else {
           console.error("❌ No Vercel domain found for webhook setup");
       }
   } else {
       bot.launch().catch(err => console.error("Failed to launch bot:", err));
+      registerCommands(bot.telegram).catch(err => console.error("Failed to set the command menu:", describeErr(err)));
       console.log("Telegram bot started successfully in polling mode.");
       process.once('SIGINT', () => bot.stop('SIGINT'));
       process.once('SIGTERM', () => bot.stop('SIGTERM'));

@@ -371,6 +371,7 @@ export type ChatUserContext = {
   displayName?: string;   // the customer's Telegram name, for the admin's conversation list
   voice?: boolean;        // the message was a voice message (the text is its transcript)
   contact?: boolean;      // the message carries the phone number the customer shared with Telegram's button
+  tgUserId?: number;      // Mini App: the Telegram account from verified launch data (requests are listed for it, saved details reused)
   actions?: ChatActions;  // set by handleConversationalChat: buttons the interface should offer under the answer
   exam?: boolean;   // a quality-exam question: nothing is recorded (no history, no unanswered-question entries)
 };
@@ -810,16 +811,20 @@ export async function generateSpeech(text: string, model?: string): Promise<stri
 }
 
 async function loadCustomerContext(
-  userContext?: { telegramId?: number; webSessionId?: string }
+  userContext?: { telegramId?: number; webSessionId?: string; tgUserId?: number }
 ): Promise<string> {
   if (!sql || !userContext) return "";
-  const { telegramId, webSessionId } = userContext;
+  const { telegramId, webSessionId, tgUserId } = userContext;
   if (!telegramId && !webSessionId) return "";
 
   try {
-    const customerRes = telegramId
+    let customerRes = telegramId
       ? await sql`SELECT name, phone, address FROM customers WHERE telegram_id = ${telegramId} LIMIT 1`
       : await sql`SELECT name, phone, address FROM customers WHERE web_session_id = ${webSessionId} LIMIT 1`;
+    // A Mini App opened from Telegram: what the customer saved through the bot (e.g. the number shared with the button)
+    if (!customerRes.length && tgUserId) {
+      customerRes = await sql`SELECT name, phone, address FROM customers WHERE telegram_id = ${tgUserId} LIMIT 1`;
+    }
 
     if (!customerRes || customerRes.length === 0) return "";
     const cust = customerRes[0];

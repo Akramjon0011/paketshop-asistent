@@ -297,7 +297,8 @@ export type RequestInput = {
   items: QuoteInput[];
 };
 
-export type RequestContext = { telegramId?: number; webSessionId?: string; language?: 'uz' | 'ru' | 'en' };
+// tgUserId: the Telegram account of a Mini App session (verified launch data); the request is listed for it in the bot too
+export type RequestContext = { telegramId?: number; webSessionId?: string; tgUserId?: number; language?: 'uz' | 'ru' | 'en' };
 
 // Injectable so tests don't call the storefront or Telegram
 export type RequestDeps = {
@@ -338,8 +339,9 @@ export async function createRequest(db: Sql, input: RequestInput, ctx: RequestCo
   }
 
   const inserted = await db`
-    INSERT INTO orders (customer_name, customer_phone, delivery_address, items, total_price, status, notes)
-    VALUES (${name}, ${phone}, ${address}, ${itemsJson}::jsonb, ${quote.total_estimate}, 'pending', ${notes})
+    INSERT INTO orders (customer_name, customer_phone, delivery_address, items, total_price, status, notes, telegram_id, web_session_id)
+    VALUES (${name}, ${phone}, ${address}, ${itemsJson}::jsonb, ${quote.total_estimate}, 'pending', ${notes},
+            ${ctx.telegramId ?? ctx.tgUserId ?? null}, ${ctx.webSessionId ?? null})
     RETURNING id`;
   const requestId = inserted[0].id;
 

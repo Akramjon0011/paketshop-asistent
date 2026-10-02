@@ -1,12 +1,13 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
-import { Send, User, Package, Sparkles, Volume2, VolumeX, Mic, Square, Paperclip, LayoutGrid } from 'lucide-react';
+import { Send, User, Package, Sparkles, Volume2, VolumeX, Mic, Square, Paperclip, LayoutGrid, ClipboardList } from 'lucide-react';
 import { generateSpeech } from '../services/geminiService';
 import { featuredProducts, loadCatalog, productName, type CatalogProduct } from '../lib/catalog';
 import { detectLang, saveLang, STRINGS, type Lang } from '../lib/i18n';
 import { ProductCardInline, ProductTile } from '../components/ProductTile';
 import CatalogSheet from '../components/CatalogSheet';
+import MyRequestsSheet from '../components/MyRequestsSheet';
 
 // Buttons the server asks for under an answer: askContact — Malika asks for the phone number; quote — a price was calculated
 type ChatActions = { askContact?: boolean; quote?: boolean };
@@ -25,6 +26,10 @@ const MANAGER_URL = 'https://t.me/paketshop_uz';
 // Telegram can share the customer's own number with the bot (Bot API 6.9+); a plain browser cannot
 function telegramApp(): any {
   return (window as any).Telegram?.WebApp;
+}
+function telegramHeaders(): Record<string, string> {
+  const initData = telegramApp()?.initData;
+  return initData ? { 'X-Telegram-Init-Data': initData } : {};
 }
 function canRequestContact(): boolean {
   const tg = telegramApp();
@@ -102,6 +107,8 @@ export default function Chat() {
   const [catalog, setCatalog] = useState<CatalogProduct[] | null>(null);
   const [catalogFailed, setCatalogFailed] = useState(false);
   const [catalogOpen, setCatalogOpen] = useState(false);
+  const [requestsOpen, setRequestsOpen] = useState(false);
+  const closeRequests = useCallback(() => setRequestsOpen(false), []);
   const fetchCatalog = useCallback(() => {
     setCatalogFailed(false);
     loadCatalog().then(setCatalog).catch(() => setCatalogFailed(true));
@@ -218,7 +225,7 @@ export default function Chat() {
 
       const res = await fetch('/api/chat/stream', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...telegramHeaders() },
         body: JSON.stringify({
           message: userMessage.content,
           history: chatHistory,
@@ -393,6 +400,7 @@ export default function Chat() {
 
     try {
       const res = await fetch('/api/chat/voice', {
+        headers: telegramHeaders(),
         method: 'POST',
         body: formData
       });
@@ -458,7 +466,7 @@ export default function Chat() {
       formData.append('history', JSON.stringify(messages.map(m => ({ role: m.role, content: m.content }))));
       formData.append('language', lang);
 
-      const res = await fetch('/api/chat/image', { method: 'POST', body: formData });
+      const res = await fetch('/api/chat/image', { method: 'POST', body: formData, headers: telegramHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(t.imageFailed);
 
@@ -523,19 +531,20 @@ export default function Chat() {
     <div className="flex flex-col h-dvh bg-gray-50 font-sans">
       {/* Header */}
       <header className="bg-amber-500 text-white shadow-md p-4 flex items-center justify-between z-10 shrink-0">
-        <div className="flex items-center space-x-3 w-full max-w-4xl mx-auto px-4 sm:px-0 justify-between">
-          <div className="flex items-center space-x-3">
-             <div className="bg-white/20 p-2 rounded-full">
+        <div className="flex items-center gap-3 w-full max-w-4xl mx-auto justify-between">
+          {/* the title gives way (truncates) so the buttons always fit on a phone */}
+          <div className="flex items-center gap-3 min-w-0">
+             <div className="bg-white/20 p-2 rounded-full shrink-0 max-[400px]:hidden">
               <Package className="w-6 h-6" />
             </div>
-            <div>
-              <h1 className="text-xl font-bold tracking-tight">{brand.shopName}</h1>
-              <p className="text-amber-100 text-sm flex items-center whitespace-nowrap">
-                <Sparkles className="w-3 h-3 mr-1" /> {t.subtitle(assistantName)}
+            <div className="min-w-0">
+              <h1 className="text-xl max-[400px]:text-lg font-bold tracking-tight truncate">{brand.shopName}</h1>
+              <p className="text-amber-100 text-sm truncate">
+                <Sparkles className="w-3 h-3 mr-1 inline -mt-0.5" /> {t.subtitle(assistantName)}
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             <button
               type="button"
               onClick={() => setCatalogOpen(true)}
@@ -543,7 +552,17 @@ export default function Chat() {
               title={t.catalogTitle}
             >
               <LayoutGrid className="w-4 h-4" />
-              <span className="max-[400px]:hidden">{t.catalog}</span>
+              <span className="max-[480px]:hidden">{t.catalog}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setRequestsOpen(true)}
+              className="bg-white/20 hover:bg-white/30 px-3 py-2 rounded-full transition-colors flex items-center gap-1.5 text-sm font-semibold cursor-pointer"
+              title={t.myRequestsTitle}
+              aria-label={t.myRequestsTitle}
+            >
+              <ClipboardList className="w-4 h-4" />
+              <span className="max-[520px]:hidden">{t.myRequests}</span>
             </button>
             <button
               type="button"
@@ -713,6 +732,8 @@ export default function Chat() {
         onClose={closeCatalog}
         onAsk={askAbout}
       />
+
+      <MyRequestsSheet open={requestsOpen} lang={lang} webSessionId={webSessionId} onClose={closeRequests} />
 
       {/* Input Area */}
       <footer className="bg-white border-t border-gray-200 p-4 shrink-0">

@@ -11,6 +11,8 @@ import { sendToAdmins } from './notify.js';
 import { bridgeEnabled, checkSiteBridge, hasSiteKey, inspectSiteProduct, rateLimitKey } from './siteBridge.js';
 import { maybeSendLeadReminder, outcomeSummary, refreshCrmStatuses, waitingRequests } from './outcomes.js';
 import { conversationDetail, listConversations } from './conversations.js';
+import { customerRequests } from './myRequests.js';
+import { verifyInitData } from './telegramAuth.js';
 import { timingSafeEqual } from 'crypto';
 import { GoogleGenAI } from "@google/genai";
 import { createRequire } from 'module';
@@ -166,6 +168,17 @@ const aiLimiter = rateLimit({
   keyGenerator: rateLimitKey,
   message: { error: "Juda tez yozyapsiz. Bir daqiqadan so'ng qayta urinib ko'ring." }
 });
+
+const myRequestsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  keyGenerator: rateLimitKey,
+  message: { error: "Juda ko'p so'rov. Bir daqiqadan so'ng qayta urinib ko'ring." }
+});
+
+// The Mini App sends Telegram's signed launch data; a valid one names the customer's Telegram account
+const miniAppUser = (req: express.Request): number | undefined =>
+  verifyInitData(req.headers['x-telegram-init-data'])?.id;
 
 
 const JWT_SECRET = process.env.JWT_SECRET || process.env.ADMIN_PASSWORD;
@@ -489,7 +502,7 @@ router.post("/chat/stream", aiLimiter, async (req, res) => {
   };
 
   try {
-    const context: ChatUserContext = { webSessionId, language: languageOf(language) };
+    const context: ChatUserContext = { webSessionId, language: languageOf(language), tgUserId: miniAppUser(req) };
     const fullText = await handleConversationalChatStream(
       message,
       history || [],
@@ -502,6 +515,24 @@ router.post("/chat/stream", aiLimiter, async (req, res) => {
     console.error("Chat stream error:", err);
     writeEvent('error', { error: "Tizimda xatolik yuz berdi" });
     res.end();
+  }
+});
+
+// 1.2.5. The customer's own requests (Mini App "So'rovlarim"): those of this session, plus those of the Telegram
+// account when the Mini App sends verified launch data. POST keeps the session id out of URLs and logs.
+router.post("/my-requests", myRequestsLimiter, async (req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  const session = req.body?.webSessionId;
+  const webSessionId = typeof session === 'string' && /^[A-Za-z0-9_-]{8,100}$/.test(session) ? session : null;
+  const telegramId = miniAppUser(req) ?? null;
+  if (!webSessionId && !telegramId) return res.status(400).json({ error: "webSessionId kerak" });
+  try {
+    await initDb();
+    res.set('Cache-Control', 'no-store');
+    res.json({ items: await customerRequests(sql, { telegramId, webSessionId }) });
+  } catch (err) {
+    console.error("My requests error:", err);
+    res.status(500).json({ error: "So'rovlarni yuklab bo'lmadi" });
   }
 });
 
@@ -568,7 +599,7 @@ router.post("/chat/voice", aiLimiter, uploadMemory.single('audio'), async (req, 
 
     // 2. Feed text into conversational chat
     const chatStart = Date.now();
-    const context: ChatUserContext = { webSessionId, language: languageOf(language), voice: true };
+    const context: ChatUserContext = { webSessionId, language: languageOf(language), voice: true, tgUserId: miniAppUser(req) };
     const replyText = await handleConversationalChat(transcribedText, history, context);
     res.set('Server-Timing', `stt;dur=${sttMs}, chat;dur=${Date.now() - chatStart}`);
 
@@ -601,7 +632,7 @@ router.post("/chat/image", aiLimiter, uploadMemory.single('image'), async (req, 
     try { history = JSON.parse(req.body.history); } catch { /* ignore a malformed history */ }
   }
   try {
-    const context: ChatUserContext = { webSessionId, language: languageOf(language) };
+    const context: ChatUserContext = { webSessionId, language: languageOf(language), tgUserId: miniAppUser(req) };
     const reply = await handleConversationalChat(caption, history, context, undefined,
       [{ data: req.file.buffer.toString('base64'), mimeType: req.file.mimetype }]);
     res.json({ reply, actions: context.actions });
