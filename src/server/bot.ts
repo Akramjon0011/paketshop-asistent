@@ -1,5 +1,5 @@
 import { Telegraf, Markup } from "telegraf";
-import { handleConversationalChat, generateSpeech, transcribeAudio, generateEmbeddingsBatch, BRAND } from './ai.js';
+import { handleConversationalChat, generateSpeech, transcribeAudio, generateEmbeddingsBatch, BRAND, type ChatUserContext } from './ai.js';
 import { sql, initDb } from './db.js';
 import { adminChatIds } from './notify.js';
 import { recordEvent as recordBotEvent, readEvents } from './events.js';
@@ -8,6 +8,8 @@ import { formatGapList, gapGroups } from './gaps.js';
 import { examSummary, runExam, saveExam } from './exam.js';
 import { Mp3Encoder } from '@breezystack/lamejs';
 import { createHash } from 'crypto';
+import { normalizeUzbekPhone } from './siteBridge.js';
+import { SHOP } from './shopInfo.js';
 
 // Helper to wrap raw 24kHz 16-bit Mono PCM in a standard WAV container for Telegram playback
 function pcmToWav(pcmBuffer: Buffer, sampleRate = 24000, numChannels = 1, bitsPerSample = 16): Buffer {
@@ -91,6 +93,14 @@ const BOT_TEXT = {
     error: "Uzur, texnik xatolik yuz berdi. Iltimos qaytadan urinib ko'ring.",
     openOnSite: "🔗 Saytda ko'rish",
     video: 'Batafsil video: ',
+    shareContact: '📱 Raqamimni yuborish',
+    contactPlaceholder: 'Yoki raqamni yozing',
+    leaveRequest: "✅ So'rov qoldirish",
+    callManager: "📞 Menejer bilan bog'lanish",
+    wantRequest: "So'rov qoldirmoqchiman",
+    myContact: (phone: string, name: string) => `Mening telefon raqamim: ${phone}${name ? `, ismim: ${name}` : ''}`,
+    contactCard: (phone: string, name: string) => `Kontakt: ${[name, phone].filter(Boolean).join(', ')}`,
+    contactSaved: (phone: string) => `✅ Raqamingiz saqlandi: ${phone}. So'rov qoldirganingizda qayta so'ramayman.`,
   },
   ru: {
     welcome: () => `Здравствуйте! Я ${BRAND.assistantNameRu}, помощник PaketShop.uz. Помогу подобрать одноразовую посуду и упаковку, рассчитать цену и количество. Какой товар вам нужен?\n\nO'zbekcha yozsangiz, o'zbekcha javob beraman.`,
@@ -104,6 +114,14 @@ const BOT_TEXT = {
     error: 'Извините, произошла техническая ошибка. Попробуйте ещё раз.',
     openOnSite: '🔗 Открыть на сайте',
     video: 'Видео: ',
+    shareContact: '📱 Отправить мой номер',
+    contactPlaceholder: 'Или напишите номер',
+    leaveRequest: '✅ Оставить заявку',
+    callManager: '📞 Связаться с менеджером',
+    wantRequest: 'Хочу оставить заявку',
+    myContact: (phone: string, name: string) => `Мой номер телефона: ${phone}${name ? `, меня зовут ${name}` : ''}`,
+    contactCard: (phone: string, name: string) => `Контакт: ${[name, phone].filter(Boolean).join(', ')}`,
+    contactSaved: (phone: string) => `✅ Номер сохранён: ${phone}. При заявке больше не буду его спрашивать.`,
   },
 };
 
@@ -370,7 +388,8 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
       const from = messageObj.from;
       const displayName = [[from.first_name, from.last_name].filter(Boolean).join(' '), from.username ? `@${from.username}` : '']
         .filter(Boolean).join(' ').trim();
-      const responseText = await handleConversationalChat(queryText, [], { telegramId: userId, displayName: displayName || undefined, voice: isVoice }, undefined, images);
+      const chatContext: ChatUserContext = { telegramId: userId, displayName: displayName || undefined, voice: isVoice, contact: !!messageObj.sharedContact };
+      const responseText = await handleConversationalChat(queryText, [], chatContext, undefined, images);
 
       let finalResponseText = responseText;
       let imageUrls: string[] = [];
@@ -406,27 +425,48 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
       // A recommended product comes with its photo (as the message itself) and a button to its page on paketshop.uz
       const recommended = await recommendedProduct(finalResponseText, !!businessConnectionId);
       const pageUrl = recommended?.url ? (answerText === BOT_TEXT.ru ? ruPage(recommended.url) : recommended.url) : null;
-      const linkButton = pageUrl
-        ? { reply_markup: { inline_keyboard: [[{ text: answerText.openOnSite, url: pageUrl }]] } }
-        : {};
+
+      // Buttons under the answer (private chats; business chats keep plain messages):
+      //  - the answer asks for the phone number -> "send my number" (Telegram shares the customer's own number),
+      //  - a price was calculated -> "leave a request" / "contact a manager", next to the product page link.
+      // A reply keyboard and an inline keyboard cannot share a message, so the number request wins.
+      const actions = chatContext.actions;
+      const canButtons = !businessConnectionId && messageObj.chat?.type === 'private';
+      let buttons: Record<string, unknown> = {};
+      if (canButtons && actions?.askContact) {
+        buttons = { reply_markup: {
+          keyboard: [[{ text: answerText.shareContact, request_contact: true }]],
+          resize_keyboard: true,
+          one_time_keyboard: true,
+          input_field_placeholder: answerText.contactPlaceholder,
+        } };
+      } else {
+        const rows: any[][] = [];
+        if (pageUrl) rows.push([{ text: answerText.openOnSite, url: pageUrl }]);
+        if (canButtons && actions?.quote) {
+          rows.push([{ text: answerText.leaveRequest, callback_data: 'lead' }, { text: answerText.callManager, url: `https://t.me/${SHOP.telegram.replace(/^@/, '')}` }]);
+        }
+        // otherwise drop a "send my number" keyboard left from an earlier question
+        buttons = rows.length ? { reply_markup: { inline_keyboard: rows } } : canButtons ? { reply_markup: { remove_keyboard: true } } : {};
+      }
 
       // Send response
       if (imageUrls.length > 0) {
          const firstImage = imageUrls[0];
-         if (firstImage.startsWith('http')) {
-            await ctx.telegram.sendPhoto(chatId, firstImage, { ...replyOptions, caption: plainText });
+         if (firstImage.startsWith('http') && plainText.length <= 1024) {
+            await ctx.telegram.sendPhoto(chatId, firstImage, { ...replyOptions, caption: plainText, ...buttons });
          } else {
-            await ctx.telegram.sendMessage(chatId, plainText, replyOptions);
+            await ctx.telegram.sendMessage(chatId, plainText, { ...replyOptions, ...buttons });
          }
       } else if (recommended?.image && plainText.length <= 1024) {   // Telegram's caption limit
          try {
-            await ctx.telegram.sendPhoto(chatId, recommended.image, { ...replyOptions, caption: plainText, ...linkButton });
+            await ctx.telegram.sendPhoto(chatId, recommended.image, { ...replyOptions, caption: plainText, ...buttons });
          } catch (photoErr) {
             console.warn("Product photo failed, sending text instead:", describeErr(photoErr));
-            await ctx.telegram.sendMessage(chatId, plainText, { ...replyOptions, ...linkButton });
+            await ctx.telegram.sendMessage(chatId, plainText, { ...replyOptions, ...buttons });
          }
       } else {
-         await ctx.telegram.sendMessage(chatId, plainText, { ...replyOptions, ...linkButton });
+         await ctx.telegram.sendMessage(chatId, plainText, { ...replyOptions, ...buttons });
       }
 
       // Voice answer only to a voice message: a typed question gets text (decided with the shop owner, saves the TTS quota)
@@ -481,6 +521,52 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
 
   bot.on('photo', async (ctx) => {
     await processMessage(ctx, ctx.message, false, undefined, true);
+  });
+
+  // A phone number shared with the "send my number" button (or a contact card). The customer's own number is saved,
+  // so Malika does not ask for it again. If Malika had just asked for it, the conversation continues with it;
+  // otherwise (e.g. shared from the Mini App, whose conversation is separate) the number is only confirmed.
+  bot.on('contact', async (ctx) => {
+    const contact = ctx.message.contact;
+    const own = contact.user_id === ctx.from.id;
+    const phone = normalizeUzbekPhone(contact.phone_number) ?? `+${String(contact.phone_number).replace(/\D/g, '')}`;
+    const name = [contact.first_name, contact.last_name].filter(Boolean).join(' ').trim();
+    if (own && sql) {
+      try {
+        await initDb();
+        await sql`INSERT INTO customers (telegram_id, name, phone) VALUES (${ctx.from.id}, ${name || null}, ${phone})
+                  ON CONFLICT (telegram_id) DO UPDATE SET phone = EXCLUDED.phone, name = COALESCE(customers.name, EXCLUDED.name)`;
+      } catch (err) {
+        console.warn("Saving the shared phone number failed:", err);
+      }
+    }
+    let asked = false;
+    let lang = langOf(ctx.from.language_code);
+    if (sql) {
+      try {
+        const last = await sql`SELECT content, meta FROM conversation_history WHERE telegram_id = ${ctx.from.id} AND role = 'model' ORDER BY id DESC LIMIT 1`;
+        asked = !!last[0]?.meta?.askContact;
+        if (last[0]?.content) lang = textLang(String(last[0].content));
+      } catch { /* treated as not asked */ }
+    }
+    const text = BOT_TEXT[lang];
+    if (own && !asked) {
+      await ctx.reply(text.contactSaved(phone), { reply_markup: { remove_keyboard: true } });
+      return;
+    }
+    await processMessage(ctx, { ...ctx.message, text: own ? text.myContact(phone, name) : text.contactCard(phone, name), sharedContact: own }, false);
+  });
+
+  // "✅ So'rov qoldirish" under a quote: continues as if the customer had written it
+  bot.action('lead', async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    const message: any = ctx.callbackQuery.message;
+    if (!message || !ctx.from) return;
+    // keep the links, drop the button itself (a second tap would start the same request again)
+    const rows = (message.reply_markup?.inline_keyboard ?? []).map((row: any[]) => row.filter(b => b.url)).filter((row: any[]) => row.length);
+    await ctx.editMessageReplyMarkup(rows.length ? { inline_keyboard: rows } : undefined).catch(() => {});
+    const lang = textLang(String(message.text || message.caption || ''));
+    await processMessage(ctx, { from: ctx.from, chat: message.chat, text: BOT_TEXT[lang].wantRequest }, false);
   });
 
   // Images sent "as a file" (uncompressed); other documents are ignored

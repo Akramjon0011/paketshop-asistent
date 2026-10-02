@@ -66,7 +66,7 @@ export async function checkAnswer(db: Sql, c: ExamCase, rawAnswer: string): Prom
 
   if (!answer || /tushunmadim|juda ko'p ichki so'rovlar|Tizimda xatolik/i.test(answer)) problems.push("bo'sh yoki xato javob");
   if (scriptOf(answer) !== c.lang) problems.push(c.lang === 'ru' ? "ruscha savolga ruscha javob kelmadi" : "o'zbekcha savolga o'zbekcha javob kelmadi");
-  if (mentionsToolName(answer) || /\[BILMADIM/i.test(rawAnswer)) problems.push("ichki nom yoki belgi ko'rinib qoldi");
+  if (mentionsToolName(answer) || /\[(BILMADIM|\s*KONTAKT)/i.test(rawAnswer)) problems.push("ichki nom yoki belgi ko'rinib qoldi");
 
   if (c.product) {
     const p = await productBySku(db, c.product);

@@ -8,13 +8,28 @@ import { detectLang, saveLang, STRINGS, type Lang } from '../lib/i18n';
 import { ProductCardInline, ProductTile } from '../components/ProductTile';
 import CatalogSheet from '../components/CatalogSheet';
 
+// Buttons the server asks for under an answer: askContact — Malika asks for the phone number; quote — a price was calculated
+type ChatActions = { askContact?: boolean; quote?: boolean };
+
 type Message = {
   id: string;
   role: 'user' | 'model';
   content: string;
   imageUrl?: string;
   isAudioPlaying?: boolean;
+  actions?: ChatActions;
 };
+
+const MANAGER_URL = 'https://t.me/paketshop_uz';
+
+// Telegram can share the customer's own number with the bot (Bot API 6.9+); a plain browser cannot
+function telegramApp(): any {
+  return (window as any).Telegram?.WebApp;
+}
+function canRequestContact(): boolean {
+  const tg = telegramApp();
+  return !!tg?.initData && typeof tg.requestContact === 'function' && (tg.isVersionAtLeast?.('6.9') ?? false);
+}
 
 // Phone photos are several MB; shrink to <=1280px JPEG before uploading
 async function downscaleImage(file: File): Promise<Blob> {
@@ -253,12 +268,10 @@ export default function Chat() {
                 m.id === modelMessageId ? { ...m, content: fullReply } : m
               ));
             } else if (eventName === 'done') {
-              if (payload.reply && payload.reply !== fullReply) {
-                fullReply = payload.reply;
-                setMessages(prev => prev.map(m =>
-                  m.id === modelMessageId ? { ...m, content: fullReply } : m
-                ));
-              }
+              if (payload.reply && payload.reply !== fullReply) fullReply = payload.reply;
+              setMessages(prev => prev.map(m =>
+                m.id === modelMessageId ? { ...m, content: fullReply, actions: payload.actions } : m
+              ));
             } else if (eventName === 'error') {
               throw new Error(payload.error || "Stream xatosi");
             }
@@ -284,6 +297,24 @@ export default function Chat() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // Telegram asks the customer to share their number with the bot; the shared number continues this conversation
+  const shareContact = () => {
+    const tg = telegramApp();
+    tg?.requestContact?.((shared: boolean, response: any) => {
+      const contact = response?.responseUnsafe?.contact;
+      if (!shared || !contact?.phone_number) return;
+      const phone = String(contact.phone_number).startsWith('+') ? String(contact.phone_number) : `+${contact.phone_number}`;
+      const name = [contact.first_name, contact.last_name].filter(Boolean).join(' ');
+      sendMessageText(t.myContact(phone, name));
+    });
+  };
+
+  const openManager = () => {
+    const tg = telegramApp();
+    if (tg?.openTelegramLink && tg.initData) tg.openTelegramLink(MANAGER_URL);
+    else window.open(MANAGER_URL, '_blank', 'noopener,noreferrer');
   };
 
   // A tapped product becomes a question to the assistant (it answers with price, pieces, stock and can calculate)
@@ -387,7 +418,7 @@ export default function Chat() {
       setMessages(prev => [
         ...prev,
         userMessage,
-        { id: modelMessageId, role: 'model', content: replyText }
+        { id: modelMessageId, role: 'model', content: replyText, actions: data.actions }
       ]);
 
       // Show the reply first; the voice is generated afterwards without blocking the chat (a spoken question gets a spoken answer)
@@ -433,7 +464,7 @@ export default function Chat() {
 
       const replyText = data.reply || t.notUnderstood;
       const modelMessageId = (Date.now() + 1).toString();
-      setMessages(prev => [...prev, { id: modelMessageId, role: 'model', content: replyText }]);
+      setMessages(prev => [...prev, { id: modelMessageId, role: 'model', content: replyText, actions: data.actions }]);
       setIsLoading(false);
       if (isAudioEnabled) {
         generateSpeech(replyText)
@@ -483,6 +514,7 @@ export default function Chat() {
     processedHTML = processedHTML.replace(/\[BUYURTMA:\s*\d+\]/gi, '');
     // [BILMADIM: ...] is for the shop owner only; the server removes it from the final answer, this hides it while streaming
     processedHTML = processedHTML.replace(/\[BILMADIM:[^\]]*(\]|$)/gi, '');
+    processedHTML = processedHTML.replace(/\[\s*KONTAKT\s*(\]|$)/gi, '');
     
     return processedHTML;
   };
@@ -584,6 +616,25 @@ export default function Chat() {
                         </button>
                       </div>
                     )
+                  )}
+
+                  {message.role === 'model' && message.id === messages[messages.length - 1]?.id && !isLoading && (
+                    message.actions?.askContact && canRequestContact() ? (
+                      <div className="mt-3 flex">
+                        <button onClick={shareContact} className="bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs py-2 px-4 rounded-xl shadow transition-all">
+                          {t.shareContact}
+                        </button>
+                      </div>
+                    ) : message.actions?.quote ? (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button onClick={() => sendMessageText(t.wantRequest)} className="bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs py-2 px-4 rounded-xl shadow transition-all">
+                          {t.leaveRequest}
+                        </button>
+                        <button onClick={openManager} className="bg-white border border-amber-200 text-amber-700 hover:bg-amber-50 font-bold text-xs py-2 px-4 rounded-xl transition-all">
+                          {t.callManager}
+                        </button>
+                      </div>
+                    ) : null
                   )}
 
                   {message.isAudioPlaying && (

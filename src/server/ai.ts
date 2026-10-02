@@ -209,6 +209,7 @@ SUHBAT USLUBI
 
 SO'ROV YUBORISH
 - Mijoz sotib olmoqchi bo'lsa, quyidagilarni (imkon qadar bir xabarda) so'ra: ismi, telefon raqami, shahar yoki viloyat va yetkazish usuli (ombordan olib ketish / Toshkent bo'ylab kuryer / viloyatga kargo), kompaniya nomi (ixtiyoriy), kerakli mahsulot va qadoq soni.
+- Telefon raqamini so'rayotgan javobingning oxiriga [KONTAKT] belgisini qo'y (faqat mijozning raqami hali ma'lum bo'lmasa). U mijozga ko'rinmaydi: Telegram'da "raqamni yuborish" tugmasini chiqaradi. Mijoz "Mening telefon raqamim: ..." deb yuborsa, shu raqamni ishlat va faqat yetishmagan ma'lumotni so'ra.
 - Hammasi to'liq bo'lgach: avval calculate_quote bilan taxminiy jami summani ayt va mijozdan tasdiq ol, keyin create_request ni chaqir.
 - Muvaffaqiyatli bo'lsa: so'rov raqamini ayt va natijadagi manager_reply ma'nosini ayt (menejer qoldiq va yakuniy narxni tasdiqlab bog'lanadi).
 - Bu yakuniy buyurtma emas; to'lov va yetkazishni menejer mijoz bilan kelishadi. Mijozdan karta yoki to'lov ma'lumotini so'rama.
@@ -350,6 +351,17 @@ async function dbCheckOrderStatus(order_id: number, customerPhone: unknown, db: 
   }
 }
 
+// Buttons the answer calls for: askContact — the answer asks for the phone number ([KONTAKT] tag, removed from the
+// text): Telegram offers "send my number"; quote — a price was calculated and no request created yet: offer
+// "leave a request" / "contact a manager"
+export type ChatActions = { askContact: boolean; quote: boolean };
+
+const CONTACT_TAG = /[ \t]*\[\s*KONTAKT\s*\][ \t]*/gi;   // spaces around it go, line breaks stay
+export function extractContactTag(text: string): { text: string; askContact: boolean } {
+  if (!/\[\s*KONTAKT\s*\]/i.test(text)) return { text, askContact: false };
+  return { text: text.replace(CONTACT_TAG, ' ').replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]+/g, '\n').replace(/ {2,}/g, ' ').trim(), askContact: true };
+}
+
 // What the caller knows about the customer. `language` and `customerName` come from the storefront chat widget.
 export type ChatUserContext = {
   telegramId?: number;
@@ -358,6 +370,8 @@ export type ChatUserContext = {
   customerName?: string;
   displayName?: string;   // the customer's Telegram name, for the admin's conversation list
   voice?: boolean;        // the message was a voice message (the text is its transcript)
+  contact?: boolean;      // the message carries the phone number the customer shared with Telegram's button
+  actions?: ChatActions;  // set by handleConversationalChat: buttons the interface should offer under the answer
   exam?: boolean;   // a quality-exam question: nothing is recorded (no history, no unanswered-question entries)
 };
 
@@ -841,11 +855,13 @@ async function loadCustomerContext(
       }).join("\n");
     }
 
-    return `\n\nMIJOZ CRM MA'LUMOTLARI (saqlangan):
-Ismi: ${cust.name || 'Noma\'lum'}
-Telefon: ${cust.phone || 'Noma\'lum'}
-Hudud: ${cust.address || 'Noma\'lum'}
-Qoida: Mijozni ismi bilan hurmat bilan chaqir. So'rov yuborishda ism, telefon va hududni QAYTA SO'RAMA. Buning o'rniga: "Sizning ma'lumotlaringiz saqlangan: ${cust.name}, ${cust.phone}, ${cust.address}. So'rovni shu ma'lumotlar bilan yuboraymi?" deb so'ra. Rozi bo'lsa va mahsulot hamda qadoq soni aniq bo'lsa, "create_request" ni chaqir.${ordersHistoryText ? `\n${ordersHistoryText}\nQoida: Mijozning oldingi so'rovlariga qarab, mos boshqa mahsulotlarni suhbat davomida tabiiy tarzda tavsiya qil.` : ''}`;
+    // Only what is actually known (a phone shared with Telegram's button comes without a region)
+    const fields: Array<[string, string | null]> = [['ismi', cust.name || null], ['telefoni', cust.phone || null], ['hududi', cust.address || null]];
+    const known = fields.filter(([, value]) => value).map(([label, value]) => `${label}: ${value}`);
+    const missing = fields.filter(([, value]) => !value).map(([label]) => label);
+    if (!known.length) return "";
+    return `\n\nMIJOZ CRM MA'LUMOTLARI (saqlangan): ${known.join(', ')}
+Qoida: ${cust.name ? 'Mijozni ismi bilan hurmat bilan chaqir. ' : ''}So'rov yuborishda saqlangan ma'lumotlarni QAYTA SO'RAMA: "Ma'lumotlaringiz saqlangan: ${known.join(', ')}. So'rovni shu bilan yuboraymi?" deb tasdiqlat${missing.length ? `, faqat yetishmaganini so'ra (${missing.join(', ')})` : ''}.${cust.phone ? ' Telefon ma\'lum: [KONTAKT] belgisini qo\'yma.' : ''} Rozi bo'lsa va mahsulot hamda qadoq soni aniq bo'lsa, "create_request" ni chaqir.${ordersHistoryText ? `\n${ordersHistoryText}\nQoida: Mijozning oldingi so'rovlariga qarab, mos boshqa mahsulotlarni suhbat davomida tabiiy tarzda tavsiya qil.` : ''}`;
   } catch (crmFetchErr) {
     console.error("Failed to fetch CRM user context in loadCustomerContext:", crmFetchErr);
     return "";
@@ -942,11 +958,12 @@ export async function handleConversationalChat(
   // What this turn could not answer (catalogue searches with no result, [BILMADIM: ...] tags): saved for the shop owner
   const gaps: Gap[] = [];
   // How the answer was produced, kept with it in the history for the admin's "Suhbatlar" page
-  const turn = { started: Date.now(), model: '', tools: [] as string[], requests: [] as number[], corrected: [] as number[], unverified: [] as number[], nudged: false };
+  const turn = { started: Date.now(), model: '', tools: [] as string[], requests: [] as number[], corrected: [] as number[], unverified: [] as number[], nudged: false, askContact: false };
   const onModel = { onModel: (model: string) => { turn.model = model; } };
   const customerMeta = {
     ...(userContext?.displayName || userContext?.customerName ? { name: String(userContext.displayName || userContext.customerName).slice(0, 80) } : {}),
     ...(userContext?.voice ? { voice: true } : {}),
+    ...(userContext?.contact ? { contact: true } : {}),
     ...(images?.length ? { image: true } : {}),
   };
   const answerMeta = () => ({
@@ -957,11 +974,14 @@ export async function handleConversationalChat(
     ...(turn.corrected.length ? { corrected: turn.corrected } : {}),
     ...(turn.unverified.length ? { unverified: turn.unverified } : {}),
     ...(turn.nudged ? { nudged: true } : {}),
+    ...(turn.askContact ? { askContact: true } : {}),
     ...(gaps.length ? { gaps } : {}),
   });
-  const finishTurn = async (responseText: string, answerTopics: string[]) => {
+  const finishTurn = async (responseText: string, answerTopics: string[], askContact: boolean) => {
     answerTopics.forEach(topic => gaps.push(gapFromTag(topic)));
+    turn.askContact = askContact;
     if (userContext) {
+      userContext.actions = { askContact, quote: turn.tools.includes('calculate_quote') && !turn.requests.length };
       await appendHistory(userContext, 'user', historyText, customerMeta);
       await appendHistory(userContext, 'model', responseText, answerMeta());
     }
@@ -1024,7 +1044,8 @@ export async function handleConversationalChat(
           if (streamText) onChunk(streamText);
         }
 
-        const { text: responseText, topics: gapTopics } = extractGapTags(streamText || "Kechirasiz, men buni tushunmadim.");
+        const { text: untaggedText, topics: gapTopics } = extractGapTags(streamText || "Kechirasiz, men buni tushunmadim.");
+        const { text: responseText, askContact } = extractContactTag(untaggedText);
 
         // The text is already on the customer's screen; if an amount doesn't check out, regenerate and the final reply replaces it
         streamedAlready = !!streamText;
@@ -1050,7 +1071,7 @@ export async function handleConversationalChat(
           turn.unverified.push(...streamedBad);
           await recordEvent('number_check_failed', `still unverified ${streamedBad.join(', ')} after a correction`, 'gemini_events');
         }
-        await finishTurn(responseText, gapTopics);
+        await finishTurn(responseText, gapTopics, askContact);
         return responseText;
       }
 
@@ -1109,7 +1130,8 @@ export async function handleConversationalChat(
 
       // No function call: direct response ready
       const visibleText = parts.filter(p => p.text && !p.thought).map(p => p.text).join('').trim();
-      const { text: responseText, topics: gapTopics } = extractGapTags(visibleText || "Kechirasiz, men buni tushunmadim.");
+      const { text: untaggedText, topics: gapTopics } = extractGapTags(visibleText || "Kechirasiz, men buni tushunmadim.");
+      const { text: responseText, askContact } = extractContactTag(untaggedText);
 
       if (toolNudges > 0 && mentionsToolName(responseText)) {
         toolNudges--;
@@ -1138,7 +1160,7 @@ export async function handleConversationalChat(
         onChunk(responseText);
       }
 
-      await finishTurn(responseText, gapTopics);
+      await finishTurn(responseText, gapTopics, askContact);
       return responseText;
     }
     return "Kechirasiz, juda ko'p ichki so'rovlar bajarildi. Iltimos qaytadan urinib ko'ring.";

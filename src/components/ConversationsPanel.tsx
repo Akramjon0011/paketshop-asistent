@@ -23,7 +23,7 @@ type ConversationItem = {
 };
 
 type Meta = {
-  name?: string; voice?: boolean; image?: boolean;
+  name?: string; voice?: boolean; image?: boolean; contact?: boolean; askContact?: boolean;
   model?: string; fallback?: boolean; ms?: number; tools?: string[]; requests?: number[];
   corrected?: number[]; unverified?: number[]; nudged?: boolean; gaps?: Array<{ kind: string; topic: string }>;
 };
@@ -91,6 +91,7 @@ function AnswerMeta({ meta }: { meta: Meta }) {
         <Chip tone="bg-red-50 text-red-700 border-red-200" title="Qayta yozilgandan keyin ham tasdiqlanmagan raqam">tasdiqlanmagan: {meta.unverified.map(amount).join(', ')}</Chip>
       ) : null}
       {meta.nudged && <Chip tone="bg-orange-50 text-orange-700 border-orange-200">funksiya eslatmasi</Chip>}
+      {meta.askContact && <Chip tone="bg-sky-50 text-sky-700 border-sky-200" title="Telegram'da 'raqamni yuborish' tugmasi ko'rsatildi">📱 raqam so'raldi</Chip>}
       {meta.gaps?.map((g, i) => (
         <Chip key={i} tone="bg-purple-50 text-purple-700 border-purple-200">{g.kind === 'product' ? '📦' : 'ℹ️'} javobsiz: {g.topic}</Chip>
       ))}
@@ -271,6 +272,7 @@ export default function ConversationsPanel({ token }: { token: string }) {
                       <span>{when(m.created_at)}</span>
                       {m.meta?.voice && <span>· 🎤 ovozli xabar</span>}
                       {m.meta?.image && <span>· 🖼 rasm</span>}
+                      {m.meta?.contact && <span>· 📱 raqam Telegram tugmasi orqali</span>}
                     </div>
                   </div>
                 ) : (

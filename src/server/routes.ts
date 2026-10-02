@@ -462,7 +462,7 @@ router.post("/chat", aiLimiter, async (req, res) => {
         console.warn("Product link lookup failed:", lookupErr);
       }
     }
-    res.json({ reply: replyText, ...(product ? { product } : {}) });
+    res.json({ reply: replyText, ...(product ? { product } : {}), actions: context.actions });
   } catch (err) {
     console.error("Chat error:", err);
     res.status(500).json({ error: "Tizimda xatolik yuz berdi" });
@@ -489,13 +489,14 @@ router.post("/chat/stream", aiLimiter, async (req, res) => {
   };
 
   try {
+    const context: ChatUserContext = { webSessionId, language: languageOf(language) };
     const fullText = await handleConversationalChatStream(
       message,
       history || [],
-      { webSessionId, language: languageOf(language) },
+      context,
       (chunk) => writeEvent('chunk', { text: chunk })
     );
-    writeEvent('done', { reply: fullText });
+    writeEvent('done', { reply: fullText, actions: context.actions });
     res.end();
   } catch (err) {
     console.error("Chat stream error:", err);
@@ -567,14 +568,16 @@ router.post("/chat/voice", aiLimiter, uploadMemory.single('audio'), async (req, 
 
     // 2. Feed text into conversational chat
     const chatStart = Date.now();
-    const replyText = await handleConversationalChat(transcribedText, history, { webSessionId, language: languageOf(language), voice: true });
+    const context: ChatUserContext = { webSessionId, language: languageOf(language), voice: true };
+    const replyText = await handleConversationalChat(transcribedText, history, context);
     res.set('Server-Timing', `stt;dur=${sttMs}, chat;dur=${Date.now() - chatStart}`);
 
     // The reply text is returned right away; the client requests the voice separately via /api/tts
     // (running TTS here made the user wait for it before seeing anything).
     res.json({
       transcription: transcribedText,
-      reply: replyText
+      reply: replyText,
+      actions: context.actions
     });
 
   } catch (err) {
@@ -598,9 +601,10 @@ router.post("/chat/image", aiLimiter, uploadMemory.single('image'), async (req, 
     try { history = JSON.parse(req.body.history); } catch { /* ignore a malformed history */ }
   }
   try {
-    const reply = await handleConversationalChat(caption, history, { webSessionId, language: languageOf(language) }, undefined,
+    const context: ChatUserContext = { webSessionId, language: languageOf(language) };
+    const reply = await handleConversationalChat(caption, history, context, undefined,
       [{ data: req.file.buffer.toString('base64'), mimeType: req.file.mimetype }]);
-    res.json({ reply });
+    res.json({ reply, actions: context.actions });
   } catch (err) {
     console.error("Image chat error:", err);
     res.status(500).json({ error: "Rasmni qayta ishlashda xatolik yuz berdi" });
