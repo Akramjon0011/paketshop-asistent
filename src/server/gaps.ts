@@ -26,6 +26,12 @@ export function extractGapTags(text: string): { text: string; topics: string[] }
   return { text: cleaned, topics };
 }
 
+// "[BILMADIM: mahsulot: pitsa qutisi]" is a product the catalogue lacks; any other topic is missing information
+export function gapFromTag(topic: string): Gap {
+  const product = /^(?:mahsulot|product|товар)\s*[:\-—–]\s*(.+)$/i.exec(topic.trim());
+  return product ? { kind: 'product', topic: product[1].trim() } : { kind: 'info', topic: topic.trim() };
+}
+
 // Customers sometimes type their phone number into a question: it never goes into the report
 export function maskPersonal(text: string): string {
   return text.replace(/\+?\d[\d\s()-]{7,}\d/g, '***').replace(/\s+/g, ' ').trim().slice(0, 300);

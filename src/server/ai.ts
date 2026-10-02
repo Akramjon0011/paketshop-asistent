@@ -4,7 +4,7 @@ import { listProducts, searchProducts, getProduct, calculateQuote, createRequest
 import { SHOP, shopStatusLine } from './shopInfo.js';
 import { recordEvent } from './events.js';
 import { allowNumbersFromText, collectNumbers, findUnverifiedNumbers, formatAmount } from './numberGuard.js';
-import { channelOf, extractGapTags, recordGaps, type Gap } from './gaps.js';
+import { channelOf, extractGapTags, gapFromTag, recordGaps, type Gap } from './gaps.js';
 
 const geminiKey = process.env.GEMINI_API_KEY;
 export const ai = new GoogleGenAI({ apiKey: geminiKey as string });
@@ -195,7 +195,7 @@ MAHSULOT TUGMASI
 Bitta aniq mahsulotni tavsiya qilganingda javobingning eng oxiriga [BUYURTMA: id] yoz (id — mahsulotning id raqami). Bu mijozga mahsulot sahifasini ochadigan tugma ko'rsatadi. Bir javobda bittadan ortiq teg yozma.
 
 JAVOBSIZ SAVOL BELGISI
-Mijoz so'ragan narsa na katalogda, na bilimlar bazasida bo'lmasa (sotilmaydigan mahsulot, noma'lum yetkazish yoki to'lov sharti, bilmagan boshqa narsa), mijozga halol javob ber va javobingning eng oxiriga [BILMADIM: 2–6 so'zli mavzu, o'zbekcha] yoz, masalan [BILMADIM: pitsa qutisi 30 sm] yoki [BILMADIM: Nukusga yetkazish narxi]. Mijoz bu tegni ko'rmaydi: u do'kon egasiga nima yetishmayotganini ko'rsatadi. Oddiy "yakuniy narxni menejer tasdiqlaydi" eslatmasi uchun bu tegni yozma, faqat ma'lumot haqiqatan yo'q bo'lsa.`;
+Mijoz so'ragan narsa na katalogda, na bilimlar bazasida bo'lmasa (sotilmaydigan mahsulot, noma'lum yetkazish yoki to'lov sharti, bilmagan boshqa narsa), mijozga halol javob ber va javobingning eng oxiriga teg yoz (mavzu 2–6 so'z, o'zbekcha): katalogda yo'q mahsulot uchun [BILMADIM: mahsulot: pitsa qutisi 30 sm], yetishmagan boshqa ma'lumot uchun [BILMADIM: Nukusga yetkazish narxi]. Mijoz bu tegni ko'rmaydi: u do'kon egasiga nima yetishmayotganini ko'rsatadi. Oddiy "yakuniy narxni menejer tasdiqlaydi" eslatmasi uchun bu tegni yozma, faqat ma'lumot haqiqatan yo'q bo'lsa.`;
 }
 
 // Tools Declarations
@@ -887,7 +887,7 @@ export async function handleConversationalChat(
   // What this turn could not answer (catalogue searches with no result, [BILMADIM: ...] tags): saved for the shop owner
   const gaps: Gap[] = [];
   const finishTurn = async (answerTopics: string[]) => {
-    answerTopics.forEach(topic => gaps.push({ kind: 'info', topic }));
+    answerTopics.forEach(topic => gaps.push(gapFromTag(topic)));
     if (!gaps.length || !sql) return;
     try {
       await initDb();
