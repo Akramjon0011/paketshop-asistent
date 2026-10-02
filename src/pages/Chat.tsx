@@ -468,6 +468,8 @@ export default function Chat() {
     
     // Strip buyurtma tags from markdown rendering
     processedHTML = processedHTML.replace(/\[BUYURTMA:\s*\d+\]/gi, '');
+    // [BILMADIM: ...] is for the shop owner only; the server removes it from the final answer, this hides it while streaming
+    processedHTML = processedHTML.replace(/\[BILMADIM:[^\]]*(\]|$)/gi, '');
     
     return processedHTML;
   };

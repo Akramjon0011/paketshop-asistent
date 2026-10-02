@@ -1,7 +1,11 @@
 import { useState, useEffect } from 'react';
-import { Shield, Key, Plus, Trash2, Database, AlertCircle, Loader2, Package, ShoppingBag, Eye, CheckCircle, Clock, Truck, XCircle, Pencil, X, Users, BarChart3, TrendingUp, DollarSign, Upload, ExternalLink } from 'lucide-react';
+import { Shield, Key, Plus, Trash2, Database, AlertCircle, Loader2, Package, ShoppingBag, Eye, CheckCircle, Clock, Truck, XCircle, Pencil, X, Users, BarChart3, TrendingUp, DollarSign, Upload, ExternalLink, HelpCircle } from 'lucide-react';
 
-type Tab = 'analytics' | 'knowledge' | 'products' | 'orders' | 'customers';
+type Tab = 'analytics' | 'knowledge' | 'products' | 'orders' | 'customers' | 'gaps';
+
+type GapGroup = { kind: string; topic: string; count: number; last_at: string; channels: string[]; questions: string[] };
+
+const CHANNEL_LABELS: Record<string, string> = { telegram: 'Telegram', web: 'Mini App', site: 'Sayt', api: 'API' };
 
 type Analytics = {
   totals: { total_orders: number; total_revenue: number; unique_customers: number };
@@ -133,6 +137,9 @@ export default function Admin() {
   // --- Analytics State ---
   const [analytics, setAnalytics] = useState<Analytics>(null);
 
+  // --- Unanswered questions (what to add to the site) ---
+  const [gaps, setGaps] = useState<GapGroup[]>([]);
+
   // --- Edit Modal State ---
   const [editingProduct, setEditingProduct] = useState<EditingProduct>(null);
   const [editingKnowledge, setEditingKnowledge] = useState<EditingKnowledge>(null);
@@ -210,11 +217,36 @@ export default function Admin() {
         } else {
           setError('Analitika ma\'lumotlarini yuklab bo\'lmadi');
         }
+      } else if (activeTab === 'gaps') {
+        const res = await fetch('/api/admin/gaps?days=30', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setGaps(Array.isArray(data.groups) ? data.groups : []);
+        } else {
+          setError("Javobsiz savollarni yuklab bo'lmadi");
+        }
       }
     } catch (err) {
       setError('Tarmoq xatosi yuz berdi');
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  // The missing product / information was added to the site: hide this topic from the list
+  const handleResolveGap = async (gap: GapGroup) => {
+    try {
+      const res = await fetch('/api/admin/gaps/resolve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ kind: gap.kind, topic: gap.topic }),
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      setGaps(prev => prev.filter(g => !(g.kind === gap.kind && g.topic === gap.topic)));
+    } catch {
+      setError("Belgilab bo'lmadi, qayta urinib ko'ring");
     }
   };
 
@@ -600,6 +632,14 @@ export default function Admin() {
             }`}
           >
             <Users className="w-4 h-4" /> Mijozlar
+          </button>
+          <button
+            onClick={() => setActiveTab('gaps')}
+            className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-bold transition-all relative ${
+              activeTab === 'gaps' ? 'bg-amber-500 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            <HelpCircle className="w-4 h-4" /> Javobsiz savollar
           </button>
         </div>
 
@@ -1355,6 +1395,69 @@ export default function Admin() {
                         </div>
                       </div>
                     </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* --- TAB 5: UNANSWERED QUESTIONS --- */}
+        {activeTab === 'gaps' && (
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden animate-fadeIn">
+            <div className="p-6 border-b border-gray-100 flex justify-between items-start gap-4 bg-gray-50">
+              <div>
+                <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                  <HelpCircle className="w-5 h-5 text-amber-500" /> Javobsiz savollar
+                </h2>
+                <p className="text-xs text-gray-500 font-medium max-w-2xl">
+                  Oxirgi 30 kunda yordamchi javob topa olmagan savollar: 📦 katalogda yo'q mahsulot, ℹ️ yetishmagan ma'lumot.
+                  Kerak bo'lsa saytga qo'shing va "Hal qilindi" deb belgilang. Yordamchi keyingi sinxronlashdan keyin uni o'zi biladi.
+                </p>
+              </div>
+              <span className="bg-amber-100 text-amber-800 text-xs font-bold px-3 py-1 rounded-full border border-amber-200 shrink-0">
+                Jami: {gaps.reduce((n, g) => n + g.count, 0)} ta
+              </span>
+            </div>
+            <div className="divide-y divide-gray-100 max-h-[700px] overflow-y-auto">
+              {isLoading && gaps.length === 0 ? (
+                <div className="p-12 flex justify-center text-amber-500">
+                  <Loader2 className="w-8 h-8 animate-spin" />
+                </div>
+              ) : gaps.length === 0 ? (
+                <div className="p-16 text-center text-gray-500 flex flex-col items-center justify-center">
+                  <HelpCircle className="w-16 h-16 text-gray-300 mb-4" />
+                  <h3 className="text-lg font-bold text-gray-800">Javobsiz savollar yo'q.</h3>
+                  <p className="text-sm text-gray-400 max-w-sm mt-1">Mijoz katalogda yo'q narsani so'rasa yoki yordamchi ma'lumot topa olmasa, savol shu yerda paydo bo'ladi.</p>
+                </div>
+              ) : (
+                gaps.map((gap) => (
+                  <div key={`${gap.kind}|${gap.topic}`} className="p-5 flex flex-col md:flex-row md:items-center gap-4 hover:bg-gray-50 transition-colors">
+                    <div className="flex-1 space-y-1.5">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`text-[11px] font-bold px-2 py-0.5 rounded border ${
+                          gap.kind === 'product' ? 'bg-sky-50 text-sky-700 border-sky-200' : 'bg-violet-50 text-violet-700 border-violet-200'
+                        }`}>
+                          {gap.kind === 'product' ? '📦 Mahsulot' : "ℹ️ Ma'lumot"}
+                        </span>
+                        <span className="font-bold text-gray-900">{gap.topic}</span>
+                        <span className="text-xs font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">
+                          {gap.count} marta
+                        </span>
+                      </div>
+                      <ul className="text-xs text-gray-600 space-y-0.5">
+                        {gap.questions.map((q, i) => <li key={i} className="italic">“{q}”</li>)}
+                      </ul>
+                      <p className="text-[11px] text-gray-400">
+                        Oxirgi marta: {new Date(gap.last_at).toLocaleString('uz-UZ')} · {gap.channels.map(c => CHANNEL_LABELS[c] ?? c).join(', ')}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => handleResolveGap(gap)}
+                      className="shrink-0 flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-green-500 hover:bg-green-600 rounded-xl shadow transition-all cursor-pointer"
+                    >
+                      <CheckCircle className="w-3.5 h-3.5" /> Hal qilindi
+                    </button>
                   </div>
                 ))
               )}

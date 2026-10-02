@@ -4,6 +4,7 @@ import { sql, initDb } from './db.js';
 import { adminChatIds } from './notify.js';
 import { recordEvent as recordBotEvent, readEvents } from './events.js';
 import { planCatalogSync, applyCatalogSync, type SyncPlan } from './catalog.js';
+import { formatGapList, gapGroups } from './gaps.js';
 import { Mp3Encoder } from '@breezystack/lamejs';
 import { createHash } from 'crypto';
 
@@ -161,6 +162,23 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
       console.error("Catalog sync failed:", describeErr(err));
       await recordBotEvent('catalog_sync_failed', describeErr(err));
       await ctx.reply(`Sinxronlashda xatolik: ${describeErr(err).slice(0, 300)}`);
+    }
+  });
+
+  // Managers only: what customers asked in the last 30 days that the assistant could not answer (what to add to the site)
+  bot.command('gaps', async (ctx) => {
+    if (!adminChatIds().includes(String(ctx.from.id))) return;
+    try {
+      if (!sql) { await ctx.reply("Ma'lumotlar bazasi ulanmagan."); return; }
+      await initDb();
+      const groups = await gapGroups(sql, { days: 30, limit: 15 });
+      await ctx.reply(groups.length
+        ? ["❓ Javobsiz savollar (oxirgi 30 kun):", ...formatGapList(groups, 15), '',
+            "📦 katalogda topilmagan mahsulot, ℹ️ yetishmagan ma'lumot.",
+            "Saytga qo'shgach, admin panel → Javobsiz savollar bo'limida \"Hal qilindi\" deb belgilang."].join('\n')
+        : "So'nggi 30 kunda javobsiz savollar yo'q. 👍");
+    } catch (err: any) {
+      await ctx.reply(`Xatolik: ${describeErr(err).slice(0, 200)}`);
     }
   });
 

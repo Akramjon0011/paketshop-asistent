@@ -4,6 +4,7 @@ import { listProducts, searchProducts, getProduct, calculateQuote, createRequest
 import { SHOP, shopStatusLine } from './shopInfo.js';
 import { recordEvent } from './events.js';
 import { allowNumbersFromText, collectNumbers, findUnverifiedNumbers, formatAmount } from './numberGuard.js';
+import { channelOf, extractGapTags, recordGaps, type Gap } from './gaps.js';
 
 const geminiKey = process.env.GEMINI_API_KEY;
 export const ai = new GoogleGenAI({ apiKey: geminiKey as string });
@@ -191,7 +192,10 @@ ${SHOP.hoursText}. Telefon: ${SHOP.phone}. Telegram: ${SHOP.telegram}. Sayt: ${S
 Mijoz menejer bilan gaplashmoqchi bo'lsa yoki javob berolmasang, shu aloqa ma'lumotlarini ber.
 
 MAHSULOT TUGMASI
-Bitta aniq mahsulotni tavsiya qilganingda javobingning eng oxiriga [BUYURTMA: id] yoz (id — mahsulotning id raqami). Bu mijozga mahsulot sahifasini ochadigan tugma ko'rsatadi. Bir javobda bittadan ortiq teg yozma.`;
+Bitta aniq mahsulotni tavsiya qilganingda javobingning eng oxiriga [BUYURTMA: id] yoz (id — mahsulotning id raqami). Bu mijozga mahsulot sahifasini ochadigan tugma ko'rsatadi. Bir javobda bittadan ortiq teg yozma.
+
+JAVOBSIZ SAVOL BELGISI
+Mijoz so'ragan narsa na katalogda, na bilimlar bazasida bo'lmasa (sotilmaydigan mahsulot, noma'lum yetkazish yoki to'lov sharti, bilmagan boshqa narsa), mijozga halol javob ber va javobingning eng oxiriga [BILMADIM: 2–6 so'zli mavzu, o'zbekcha] yoz, masalan [BILMADIM: pitsa qutisi 30 sm] yoki [BILMADIM: Nukusga yetkazish narxi]. Mijoz bu tegni ko'rmaydi: u do'kon egasiga nima yetishmayotganini ko'rsatadi. Oddiy "yakuniy narxni menejer tasdiqlaydi" eslatmasi uchun bu tegni yozma, faqat ma'lumot haqiqatan yo'q bo'lsa.`;
 }
 
 // Tools Declarations
@@ -880,6 +884,18 @@ export async function handleConversationalChat(
   // Weaker fallback models sometimes describe a call instead of making it ("calculate_quote funksiyasini ishlatib
   // hisoblayman") and stop there: such a reply gets one nudge to make the call and answer properly.
   let toolNudges = 1;
+  // What this turn could not answer (catalogue searches with no result, [BILMADIM: ...] tags): saved for the shop owner
+  const gaps: Gap[] = [];
+  const finishTurn = async (answerTopics: string[]) => {
+    answerTopics.forEach(topic => gaps.push({ kind: 'info', topic }));
+    if (!gaps.length || !sql) return;
+    try {
+      await initDb();
+      await recordGaps(sql, gaps, message, channelOf(userContext));
+    } catch (gapErr) {
+      console.warn("Could not record an unanswered question:", gapErr);
+    }
+  };
   const toolNudge = {
     role: 'user',
     parts: [{ text: "Tizim tekshiruvi: javobingda ichki funksiya nomi bor. Funksiya nomlarini mijozga yozma: kerak bo'lsa funksiyani hoziroq chaqir, keyin natija bilan mijoz tilida to'liq javob ber. Bu tekshiruv haqida gapirma." }],
@@ -931,7 +947,7 @@ export async function handleConversationalChat(
           if (streamText) onChunk(streamText);
         }
 
-        const responseText = streamText || "Kechirasiz, men buni tushunmadim.";
+        const { text: responseText, topics: gapTopics } = extractGapTags(streamText || "Kechirasiz, men buni tushunmadim.");
 
         // The text is already on the customer's screen; if an amount doesn't check out, regenerate and the final reply replaces it
         streamedAlready = !!streamText;
@@ -955,6 +971,7 @@ export async function handleConversationalChat(
           await appendHistory(userContext, 'user', historyText);
           await appendHistory(userContext, 'model', responseText);
         }
+        await finishTurn(gapTopics);
         return responseText;
       }
 
@@ -988,6 +1005,9 @@ export async function handleConversationalChat(
 
         const functionResponseData: any = await runTool(name, args, userContext);
         collectNumbers(functionResponseData, allowedNumbers);
+        if (name === 'search_products' && Array.isArray(functionResponseData?.products) && functionResponseData.products.length === 0) {
+          gaps.push({ kind: 'product', topic: String(args?.query || message) });   // the customer asked for something the catalogue lacks
+        }
 
         console.log(`🔌 Function ${name} result:`, functionResponseData);
 
@@ -1006,7 +1026,7 @@ export async function handleConversationalChat(
 
       // No function call: direct response ready
       const visibleText = parts.filter(p => p.text && !p.thought).map(p => p.text).join('').trim();
-      const responseText = visibleText || "Kechirasiz, men buni tushunmadim.";
+      const { text: responseText, topics: gapTopics } = extractGapTags(visibleText || "Kechirasiz, men buni tushunmadim.");
 
       if (toolNudges > 0 && mentionsToolName(responseText)) {
         toolNudges--;
@@ -1037,6 +1057,7 @@ export async function handleConversationalChat(
         await appendHistory(userContext, 'model', responseText);
       }
 
+      await finishTurn(gapTopics);
       return responseText;
     }
     return "Kechirasiz, juda ko'p ichki so'rovlar bajarildi. Iltimos qaytadan urinib ko'ring.";

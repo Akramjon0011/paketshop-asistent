@@ -5,6 +5,8 @@ import { sql, initDb } from './db.js';
 import { generateEmbedding, generateEmbeddingsBatch, searchKnowledgeBase, handleConversationalChat, handleConversationalChatStream, transcribeAudio, generateSpeech, generateSpeechDetailed, TTS_MODELS, BRAND, BRAND_GREETING, appendHistory, type ChatUserContext } from './ai.js';
 import { runScheduledSync } from './scheduledSync.js';
 import { catalogTiles } from './catalog.js';
+import { gapGroups, maybeSendWeeklyDigest, resolveGap } from './gaps.js';
+import { sendToAdmins } from './notify.js';
 import { bridgeEnabled, checkSiteBridge, hasSiteKey, inspectSiteProduct, rateLimitKey } from './siteBridge.js';
 import { timingSafeEqual } from 'crypto';
 import { GoogleGenAI } from "@google/genai";
@@ -55,7 +57,15 @@ router.get("/cron/sync-catalog", async (req, res) => {
   if (given.length !== expected.length || !timingSafeEqual(given, expected)) return res.status(401).json({ error: "Unauthorized" });
   if (!sql) return res.status(500).json({ error: "Database not connected" });
   await initDb();
-  res.json(await runScheduledSync(sql, { embed: generateEmbeddingsBatch }));
+  const sync = await runScheduledSync(sql, { embed: generateEmbeddingsBatch });
+  // Once a week the same run sends the managers a short report (conversations, requests, unanswered questions)
+  let weeklyReport = false;
+  try {
+    weeklyReport = await maybeSendWeeklyDigest(sql, text => sendToAdmins(text, true));
+  } catch (digestErr) {
+    console.error("Weekly report failed:", digestErr);
+  }
+  res.json({ ...sync, weeklyReport });
 });
 
 // Public: GET single product details by id
@@ -883,6 +893,29 @@ router.get("/admin/orders", requireAdmin, async (req, res) => {
   try {
     const data = await sql`SELECT * FROM orders ORDER BY created_at DESC`;
     res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// 5.5. Admin: questions the assistant could not answer, grouped by topic (what to add to paketshop.uz)
+router.get("/admin/gaps", requireAdmin, async (req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  try {
+    await initDb();
+    const days = Number(req.query.days) || 30;
+    res.json({ days, groups: await gapGroups(sql, { days, limit: 100 }) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+router.post("/admin/gaps/resolve", requireAdmin, async (req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  const { kind, topic } = req.body ?? {};
+  if (typeof kind !== 'string' || typeof topic !== 'string' || !topic) return res.status(400).json({ error: "kind va topic kerak" });
+  try {
+    res.json({ resolved: await resolveGap(sql, kind, topic) });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

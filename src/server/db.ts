@@ -8,7 +8,7 @@ export const sql = process.env.DATABASE_URL ? neon(process.env.DATABASE_URL) : n
 export type Sql = NonNullable<typeof sql>;
 
 // Bump when the DDL below changes; cold starts skip all DDL when the stored version matches.
-const SCHEMA_VERSION = '2026-10-01-site-bridge-1';
+const SCHEMA_VERSION = '2026-10-02-knowledge-gaps-1';
 
 // All DDL for the schema, run as one transaction (one round trip instead of ~30)
 export function schemaStatements(db: Sql) {
@@ -89,6 +89,18 @@ export function schemaStatements(db: Sql) {
       address TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`,
+
+    // Questions the assistant could not answer (gaps.ts): what to add to the site
+    db`CREATE TABLE IF NOT EXISTS knowledge_gaps (
+      id SERIAL PRIMARY KEY,
+      kind TEXT NOT NULL,
+      topic TEXT NOT NULL,
+      question TEXT NOT NULL,
+      channel TEXT,
+      resolved BOOLEAN DEFAULT FALSE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`,
+    db`CREATE INDEX IF NOT EXISTS idx_gaps_open ON knowledge_gaps(resolved, created_at DESC)`,
 
     // Simple key-value settings (webhook cache, bot events, schema version)
     db`CREATE TABLE IF NOT EXISTS app_settings (
