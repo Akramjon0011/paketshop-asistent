@@ -1,6 +1,6 @@
 import { ExternalLink } from 'lucide-react';
 import ProductImage from './ProductImage';
-import { packText, priceText, stockOf, type CatalogProduct } from '../lib/catalog';
+import { packText, priceText, stockOf, thumbUrl, type CatalogProduct } from '../lib/catalog';
 
 function Stock({ code }: { code: string }) {
   const stock = stockOf(code);
@@ -29,7 +29,7 @@ export function ProductTile({ product, onAsk, compact = false, className = '' }:
         className="block w-full text-left cursor-pointer"
         title={`${product.name} haqida so'rash`}
       >
-        <ProductImage src={product.image_url} alt={product.name} className={compact ? 'w-full h-[72px]' : 'w-full aspect-square'} />
+        <ProductImage src={thumbUrl(product.image_url, compact ? 240 : 360)} alt={product.name} className={compact ? 'w-full h-[72px]' : 'w-full aspect-square'} />
         <div className="p-2 space-y-0.5">
           <p className="text-xs font-semibold text-gray-800 leading-snug line-clamp-2 min-h-[2rem]">{product.name}</p>
           <p className={`text-xs font-bold ${product.price === null ? 'text-gray-500' : 'text-amber-600'}`}>{priceText(product)}</p>
@@ -58,7 +58,7 @@ export function ProductCardInline({ product }: { product: CatalogProduct }) {
   const pack = packText(product);
   return (
     <div className="flex items-center gap-3 bg-amber-50/60 border border-amber-100 rounded-xl p-2">
-      <ProductImage src={product.image_url} alt={product.name} className="w-14 h-14 rounded-lg shrink-0" />
+      <ProductImage src={thumbUrl(product.image_url, 160)} alt={product.name} className="w-14 h-14 rounded-lg shrink-0" />
       <div className="min-w-0 flex-1 space-y-0.5">
         <p className="text-sm font-semibold text-gray-800 leading-snug line-clamp-2">{product.name}</p>
         <p className="text-xs text-gray-600">

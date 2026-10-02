@@ -44,6 +44,14 @@ const STOCK: Record<string, { label: string; dot: string }> = {
 
 export const stockOf = (code: string) => STOCK[code] ?? STOCK.check_with_manager;
 
+// The site stores product photos on Cloudinary at 1200px (~200 KB each); a small tile asks Cloudinary for a small copy
+// (~20 KB). Other addresses are used as they are.
+export function thumbUrl(url: string | null, width: number): string | null {
+  if (!url) return null;
+  const m = /^(https:\/\/res\.cloudinary\.com\/[^/]+\/image\/upload\/)(?:[^/]*_[^/]*\/)?(v\d+\/.+)$/.exec(url);
+  return m ? `${m[1]}c_limit,w_${width},q_auto,f_auto/${m[2]}` : url;
+}
+
 export function priceText(p: CatalogProduct): string {
   if (p.price === null) return "Narxi so'raladi";
   return `${formatPrice(p.price)} so'm${p.price_from ? 'dan' : ''}`;
