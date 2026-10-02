@@ -280,6 +280,34 @@ export async function checkSiteBridge(opts: { fetch?: Fetch; fresh?: boolean } =
   return value;
 }
 
+// One product as the storefront API returns it and as the assistant stores it (public fields only), to explain a
+// difference between the site and the assistant's answers.
+export async function inspectSiteProduct(sku: string, opts: { fetch?: Fetch } = {}): Promise<{ api: ApiProduct | null; mapped: SiteProduct | null; error?: string }> {
+  const key = siteApiKey();
+  if (!key) return { api: null, mapped: null, error: 'ASSISTANT_API_KEY is not set' };
+  let cursor: string | null = null;
+  try {
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const url = new URL('/api/assistant/catalog', siteBaseUrl());
+      url.searchParams.set('limit', String(PAGE_SIZE));
+      if (cursor) url.searchParams.set('cursor', cursor);
+      const res = await (opts.fetch ?? fetch)(url, {
+        headers: { Authorization: `Bearer ${key}`, Accept: 'application/json', 'User-Agent': 'PaketshopAssistant/1.0' },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) return { api: null, mapped: null, error: `HTTP ${res.status}` };
+      const data: any = await res.json();
+      const raw = Array.isArray(data?.products) ? data.products.find((p: any) => p?.sku === sku) : undefined;
+      if (raw) return { api: raw, mapped: isApiProduct(raw) ? apiToSiteProduct(raw) : null };
+      cursor = typeof data?.nextCursor === 'string' && data.nextCursor ? data.nextCursor : null;
+      if (!cursor) break;
+    }
+    return { api: null, mapped: null, error: 'not found' };
+  } catch (err) {
+    return { api: null, mapped: null, error: String((err as any)?.message || err).slice(0, 150) };
+  }
+}
+
 // ---------- requests -> site CRM ----------
 
 // Same rule as the site's normalizeUzbekPhone: "+998" + 9 digits, anything else is not accepted by its lead API

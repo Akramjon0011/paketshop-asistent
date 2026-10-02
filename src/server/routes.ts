@@ -5,7 +5,7 @@ import { sql, initDb } from './db.js';
 import { generateEmbedding, generateEmbeddingsBatch, searchKnowledgeBase, handleConversationalChat, handleConversationalChatStream, transcribeAudio, generateSpeech, generateSpeechDetailed, TTS_MODELS, BRAND, BRAND_GREETING, appendHistory, type ChatUserContext } from './ai.js';
 import { runScheduledSync } from './scheduledSync.js';
 import { catalogTiles } from './catalog.js';
-import { bridgeEnabled, checkSiteBridge, hasSiteKey, rateLimitKey } from './siteBridge.js';
+import { bridgeEnabled, checkSiteBridge, hasSiteKey, inspectSiteProduct, rateLimitKey } from './siteBridge.js';
 import { timingSafeEqual } from 'crypto';
 import { GoogleGenAI } from "@google/genai";
 import { createRequire } from 'module';
@@ -100,9 +100,13 @@ const apiLimiter = rateLimit({
 
 router.use(apiLimiter);
 
-// Is the link to paketshop.uz working (shared key, site API deployed)? Status only, no data; cached for 30 s.
-router.get("/site-bridge", async (_req, res) => {
-  res.json(await checkSiteBridge());
+// Is the link to paketshop.uz working (shared key, site API deployed)? Status only, cached for 30 s.
+// ?sku=... shows that one product as the site API returns it and as the assistant would store it (public data only).
+router.get("/site-bridge", async (req, res) => {
+  const sku = typeof req.query.sku === 'string' ? req.query.sku.trim().slice(0, 80) : '';
+  if (!sku) return res.json(await checkSiteBridge());
+  const stored = sql ? await sql`SELECT price, price_on_request, pack_unit, pack_qty, unit_price, stock_note, synced_at FROM products WHERE sku = ${sku}` : [];
+  res.json({ sku, ...(await inspectSiteProduct(sku)), stored: stored[0] ?? null });
 });
 
 // Compact public catalogue for the Mini App (catalogue sheet, product strip, cards under answers).
