@@ -13,8 +13,13 @@ function Stock({ code }: { code: string }) {
 }
 
 // Small card: photo, name, pack price, pieces per pack, stock. Tapping asks the assistant about the product; ↗ opens its
-// page on paketshop.uz.
-export function ProductTile({ product, onAsk, className = '' }: { product: CatalogProduct; onAsk: (p: CatalogProduct) => void; className?: string }) {
+// page on paketshop.uz. `compact` (the strip above the first message) keeps only a low photo, the name and the price.
+export function ProductTile({ product, onAsk, compact = false, className = '' }: {
+  product: CatalogProduct;
+  onAsk: (p: CatalogProduct) => void;
+  compact?: boolean;
+  className?: string;
+}) {
   const pack = packText(product);
   return (
     <div className={`relative bg-white border border-gray-100 rounded-xl overflow-hidden shadow-sm hover:shadow-md hover:border-amber-200 transition ${className}`}>
@@ -24,12 +29,12 @@ export function ProductTile({ product, onAsk, className = '' }: { product: Catal
         className="block w-full text-left cursor-pointer"
         title={`${product.name} haqida so'rash`}
       >
-        <ProductImage src={product.image_url} alt={product.name} className="w-full aspect-square" />
+        <ProductImage src={product.image_url} alt={product.name} className={compact ? 'w-full h-[72px]' : 'w-full aspect-square'} />
         <div className="p-2 space-y-0.5">
           <p className="text-xs font-semibold text-gray-800 leading-snug line-clamp-2 min-h-[2rem]">{product.name}</p>
           <p className={`text-xs font-bold ${product.price === null ? 'text-gray-500' : 'text-amber-600'}`}>{priceText(product)}</p>
-          {pack && <p className="text-[11px] text-gray-500 leading-tight">{pack}</p>}
-          <Stock code={product.availability} />
+          {!compact && pack && <p className="text-[11px] text-gray-500 leading-tight">{pack}</p>}
+          {!compact && <Stock code={product.availability} />}
         </div>
       </button>
       {product.url && (
