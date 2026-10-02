@@ -67,7 +67,10 @@ const noteGeminiProblem = (kind: string, model: string, err: unknown) =>
   recordEvent(kind, `${model}: ${String((err as any)?.message || err).replace(/\s+/g, ' ').slice(0, 480)}`, 'gemini_events');
 
 // generateContent with one quick retry on the primary model, then one attempt (plus retry) on the fallback model
-export async function generateContentResilient(params: Parameters<typeof ai.models.generateContent>[0]) {
+// `onModel` learns which model actually answered (the conversation log shows when a backup model was used)
+type ModelReport = { onModel?: (model: string) => void };
+
+export async function generateContentResilient(params: Parameters<typeof ai.models.generateContent>[0], report: ModelReport = {}) {
   const models = availableModels([params.model, ...CHAT_FALLBACK_MODELS]);
   const deadline = Date.now() + GEMINI_TOTAL_BUDGET_MS;
   let lastErr: any;
@@ -79,6 +82,7 @@ export async function generateContentResilient(params: Parameters<typeof ai.mode
       try {
         const result = await ai.models.generateContent({ ...params, model, config: { ...params.config, abortSignal: controller.signal } });
         countAnswer(params.model, model);
+        report.onModel?.(model);
         return result;
       } catch (err) {
         lastErr = err;
@@ -109,7 +113,7 @@ export async function generateContentResilient(params: Parameters<typeof ai.mode
 }
 
 // generateContentStream with retry on primary, fallback to fallback model
-export async function generateContentStreamResilient(params: Parameters<typeof ai.models.generateContentStream>[0]) {
+export async function generateContentStreamResilient(params: Parameters<typeof ai.models.generateContentStream>[0], report: ModelReport = {}) {
   const models = availableModels([params.model, ...CHAT_FALLBACK_MODELS]);
   const deadline = Date.now() + GEMINI_TOTAL_BUDGET_MS;
   let lastErr: any;
@@ -121,6 +125,7 @@ export async function generateContentStreamResilient(params: Parameters<typeof a
       try {
         const stream = await ai.models.generateContentStream({ ...params, model, config: { ...params.config, abortSignal: controller.signal } });
         countAnswer(params.model, model);
+        report.onModel?.(model);
         return stream;
       } catch (err) {
         lastErr = err;
@@ -351,6 +356,8 @@ export type ChatUserContext = {
   webSessionId?: string;
   language?: 'uz' | 'ru' | 'en';
   customerName?: string;
+  displayName?: string;   // the customer's Telegram name, for the admin's conversation list
+  voice?: boolean;        // the message was a voice message (the text is its transcript)
   exam?: boolean;   // a quality-exam question: nothing is recorded (no history, no unanswered-question entries)
 };
 
@@ -390,6 +397,7 @@ export async function runTool(name: string, args: any, userContext?: ChatUserCon
 // --- Conversation history persistence (serverless-safe) ---
 const HISTORY_LIMIT = 20;
 const SUMMARIZE_THRESHOLD = 30; // when total messages exceed this, summarize older ones
+const SUMMARIZE_BATCH = 10;     // ...once at least this many have left the verbatim window
 
 export async function loadHistory(
   userContext: { telegramId?: number; webSessionId?: string }
@@ -438,15 +446,16 @@ export async function loadSummary(
 export async function appendHistory(
   userContext: { telegramId?: number; webSessionId?: string },
   role: 'user' | 'model',
-  content: string
+  content: string,
+  meta?: Record<string, unknown>
 ): Promise<void> {
   if (!sql) return;
   const { telegramId, webSessionId } = userContext;
   if (!telegramId && !webSessionId) return;
   try {
     await sql`
-      INSERT INTO conversation_history (telegram_id, web_session_id, role, content)
-      VALUES (${telegramId || null}, ${webSessionId || null}, ${role}, ${content})
+      INSERT INTO conversation_history (telegram_id, web_session_id, role, content, meta)
+      VALUES (${telegramId || null}, ${webSessionId || null}, ${role}, ${content}, ${meta && Object.keys(meta).length ? JSON.stringify(meta) : null}::jsonb)
     `;
     // Fire-and-forget summarization check (don't block response)
     maybeSummarize(userContext).catch(err => console.error("Background summarize error:", err));
@@ -475,21 +484,23 @@ async function maybeSummarize(
     const existingSummary = sumRes[0]?.summary || "";
     const lastId = sumRes[0]?.last_summarized_history_id || 0;
 
-    // Fetch older messages (excluding the most recent HISTORY_LIMIT which stay verbatim)
-    const oldRows = telegramId
+    // Messages not yet in the summary, except the most recent HISTORY_LIMIT which stay verbatim. Summarized in
+    // batches: before, every new message past the threshold started another summarization call.
+    const pending = telegramId
       ? await sql`
           SELECT id, role, content FROM conversation_history
           WHERE telegram_id = ${telegramId} AND id > ${lastId}
-          ORDER BY id ASC
-          LIMIT ${total - HISTORY_LIMIT}
+          ORDER BY id DESC
+          OFFSET ${HISTORY_LIMIT}
         `
       : await sql`
           SELECT id, role, content FROM conversation_history
           WHERE web_session_id = ${webSessionId} AND id > ${lastId}
-          ORDER BY id ASC
-          LIMIT ${total - HISTORY_LIMIT}
+          ORDER BY id DESC
+          OFFSET ${HISTORY_LIMIT}
         `;
-    if (oldRows.length === 0) return;
+    if (pending.length < SUMMARIZE_BATCH) return;
+    const oldRows = pending.reverse();
 
     const transcript = oldRows.map((r: any) => `${r.role === 'user' ? 'Mijoz' : 'Malika'}: ${r.content}`).join('\n');
     const prompt = `Quyidagi suhbatni 3-5 jumlada qisqacha xulosalang. Mijozning afzalliklari, savatdagi mahsulotlar, qaror qilingan ma'lumotlar (ism, telefon, manzil), tugallanmagan harakatlar haqida yozing. O'zbek tilida.
@@ -930,8 +941,30 @@ export async function handleConversationalChat(
   let toolNudges = 1;
   // What this turn could not answer (catalogue searches with no result, [BILMADIM: ...] tags): saved for the shop owner
   const gaps: Gap[] = [];
-  const finishTurn = async (answerTopics: string[]) => {
+  // How the answer was produced, kept with it in the history for the admin's "Suhbatlar" page
+  const turn = { started: Date.now(), model: '', tools: [] as string[], requests: [] as number[], corrected: [] as number[], unverified: [] as number[], nudged: false };
+  const onModel = { onModel: (model: string) => { turn.model = model; } };
+  const customerMeta = {
+    ...(userContext?.displayName || userContext?.customerName ? { name: String(userContext.displayName || userContext.customerName).slice(0, 80) } : {}),
+    ...(userContext?.voice ? { voice: true } : {}),
+    ...(images?.length ? { image: true } : {}),
+  };
+  const answerMeta = () => ({
+    ...(turn.model ? { model: turn.model, fallback: turn.model !== CHAT_MODEL } : {}),
+    ms: Date.now() - turn.started,
+    ...(turn.tools.length ? { tools: turn.tools } : {}),
+    ...(turn.requests.length ? { requests: turn.requests } : {}),
+    ...(turn.corrected.length ? { corrected: turn.corrected } : {}),
+    ...(turn.unverified.length ? { unverified: turn.unverified } : {}),
+    ...(turn.nudged ? { nudged: true } : {}),
+    ...(gaps.length ? { gaps } : {}),
+  });
+  const finishTurn = async (responseText: string, answerTopics: string[]) => {
     answerTopics.forEach(topic => gaps.push(gapFromTag(topic)));
+    if (userContext) {
+      await appendHistory(userContext, 'user', historyText, customerMeta);
+      await appendHistory(userContext, 'model', responseText, answerMeta());
+    }
     if (!gaps.length || !sql || userContext?.exam) return;
     try {
       await initDb();
@@ -966,7 +999,7 @@ export async function handleConversationalChat(
               temperature: 0.7,
               thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
             }
-          });
+          }, onModel);
 
           for await (const chunk of stream) {
             const chunkText = chunk.text;
@@ -985,7 +1018,7 @@ export async function handleConversationalChat(
               temperature: 0.7,
               thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
             }
-          });
+          }, onModel);
           const parts = fallbackRes.candidates?.[0]?.content?.parts || [];
           streamText = parts.filter(p => p.text && !p.thought).map(p => p.text).join('').trim();
           if (streamText) onChunk(streamText);
@@ -997,6 +1030,7 @@ export async function handleConversationalChat(
         streamedAlready = !!streamText;
         if (toolNudges > 0 && mentionsToolName(responseText)) {
           toolNudges--;
+          turn.nudged = true;
           correctionPending = true;   // the next round runs with tools, so the call can actually be made
           await recordEvent('tool_narration', responseText.slice(0, 160), 'gemini_events');
           contents.push({ role: 'model', parts: [{ text: responseText }] }, toolNudge);
@@ -1005,17 +1039,18 @@ export async function handleConversationalChat(
         const streamedBad = findUnverifiedNumbers(responseText, allowedNumbers);
         if (streamedBad.length && corrections > 0) {
           corrections--;
+          turn.corrected.push(...streamedBad);
           correctionPending = true;
           await recordEvent('number_check', `unverified ${streamedBad.join(', ')} in: ${responseText.slice(0, 120)}`, 'gemini_events');
           contents.push({ role: 'model', parts: [{ text: responseText }] }, correctionRequest(streamedBad));
           continue;
         }
 
-        if (userContext) {
-          await appendHistory(userContext, 'user', historyText);
-          await appendHistory(userContext, 'model', responseText);
+        if (streamedBad.length) {
+          turn.unverified.push(...streamedBad);
+          await recordEvent('number_check_failed', `still unverified ${streamedBad.join(', ')} after a correction`, 'gemini_events');
         }
-        await finishTurn(gapTopics);
+        await finishTurn(responseText, gapTopics);
         return responseText;
       }
 
@@ -1029,7 +1064,7 @@ export async function handleConversationalChat(
           thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           tools: tools
         }
-      });
+      }, onModel);
 
       const candidate = response.candidates?.[0];
       const parts = candidate?.content?.parts;
@@ -1049,6 +1084,10 @@ export async function handleConversationalChat(
 
         const functionResponseData: any = await runTool(name, args, userContext);
         collectNumbers(functionResponseData, allowedNumbers);
+        turn.tools.push(name);
+        if (name === 'create_request' && functionResponseData?.success && Number.isInteger(functionResponseData.request_id)) {
+          turn.requests.push(functionResponseData.request_id);
+        }
         if (name === 'search_products' && Array.isArray(functionResponseData?.products) && functionResponseData.products.length === 0) {
           gaps.push({ kind: 'product', topic: String(args?.query || message) });   // the customer asked for something the catalogue lacks
         }
@@ -1074,6 +1113,7 @@ export async function handleConversationalChat(
 
       if (toolNudges > 0 && mentionsToolName(responseText)) {
         toolNudges--;
+        turn.nudged = true;
         correctionPending = true;
         await recordEvent('tool_narration', responseText.slice(0, 160), 'gemini_events');
         contents.push({ role: 'model', parts: [{ text: responseText }] }, toolNudge);
@@ -1084,11 +1124,13 @@ export async function handleConversationalChat(
       if (unverified.length) {
         if (corrections > 0) {
           corrections--;
+          turn.corrected.push(...unverified);
           correctionPending = true;
           await recordEvent('number_check', `unverified ${unverified.join(', ')} in: ${responseText.slice(0, 120)}`, 'gemini_events');
           contents.push({ role: 'model', parts: [{ text: responseText }] }, correctionRequest(unverified));
           continue;
         }
+        turn.unverified.push(...unverified);
         await recordEvent('number_check_failed', `still unverified ${unverified.join(', ')} after a correction`, 'gemini_events');
       }
 
@@ -1096,12 +1138,7 @@ export async function handleConversationalChat(
         onChunk(responseText);
       }
 
-      if (userContext) {
-        await appendHistory(userContext, 'user', historyText);
-        await appendHistory(userContext, 'model', responseText);
-      }
-
-      await finishTurn(gapTopics);
+      await finishTurn(responseText, gapTopics);
       return responseText;
     }
     return "Kechirasiz, juda ko'p ichki so'rovlar bajarildi. Iltimos qaytadan urinib ko'ring.";

@@ -10,6 +10,7 @@ import { examSummary, runExam, saveExam } from './exam.js';
 import { sendToAdmins } from './notify.js';
 import { bridgeEnabled, checkSiteBridge, hasSiteKey, inspectSiteProduct, rateLimitKey } from './siteBridge.js';
 import { maybeSendLeadReminder, outcomeSummary, refreshCrmStatuses, waitingRequests } from './outcomes.js';
+import { conversationDetail, listConversations } from './conversations.js';
 import { timingSafeEqual } from 'crypto';
 import { GoogleGenAI } from "@google/genai";
 import { createRequire } from 'module';
@@ -566,7 +567,7 @@ router.post("/chat/voice", aiLimiter, uploadMemory.single('audio'), async (req, 
 
     // 2. Feed text into conversational chat
     const chatStart = Date.now();
-    const replyText = await handleConversationalChat(transcribedText, history, { webSessionId, language: languageOf(language) });
+    const replyText = await handleConversationalChat(transcribedText, history, { webSessionId, language: languageOf(language), voice: true });
     res.set('Server-Timing', `stt;dur=${sttMs}, chat;dur=${Date.now() - chatStart}`);
 
     // The reply text is returned right away; the client requests the voice separately via /api/tts
@@ -856,6 +857,30 @@ router.post("/admin/gaps/resolve", requireAdmin, async (req, res) => {
   if (typeof kind !== 'string' || typeof topic !== 'string' || !topic) return res.status(400).json({ error: "kind va topic kerak" });
   try {
     res.json({ resolved: await resolveGap(sql, kind, topic) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// 5.7. Admin: conversations with Malika ("Suhbatlar"): list with filters, then one conversation in full
+router.get("/admin/conversations", requireAdmin, async (req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  try {
+    await initDb();
+    const { days, channel, flag, q } = req.query;
+    res.json({ items: await listConversations(sql, { days, channel, flag, q }) });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+router.get("/admin/conversations/:key", requireAdmin, async (req, res) => {
+  if (!sql) return res.status(500).json({ error: "Database not connected" });
+  try {
+    await initDb();
+    const detail = await conversationDetail(sql, req.params.key);
+    if (!detail) return res.status(404).json({ error: "Suhbat topilmadi" });
+    res.json(detail);
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

@@ -8,7 +8,7 @@ export const sql = process.env.DATABASE_URL ? neon(process.env.DATABASE_URL) : n
 export type Sql = NonNullable<typeof sql>;
 
 // Bump when the DDL below changes; cold starts skip all DDL when the stored version matches.
-const SCHEMA_VERSION = '2026-10-02-crm-status-1';
+const SCHEMA_VERSION = '2026-10-03-conversation-meta-1';
 
 // All DDL for the schema, run as one transaction (one round trip instead of ~30)
 export function schemaStatements(db: Sql) {
@@ -125,6 +125,10 @@ export function schemaStatements(db: Sql) {
     )`,
     db`CREATE INDEX IF NOT EXISTS idx_history_telegram ON conversation_history(telegram_id, created_at DESC)`,
     db`CREATE INDEX IF NOT EXISTS idx_history_web ON conversation_history(web_session_id, created_at DESC)`,
+    // How each answer was produced (model, time, tools, requests, corrections, unanswered topics) and, on customer
+    // messages, the name/voice/photo: shown on the admin's "Suhbatlar" page (conversations.ts)
+    db`ALTER TABLE conversation_history ADD COLUMN IF NOT EXISTS meta JSONB`,
+    db`CREATE INDEX IF NOT EXISTS idx_history_created ON conversation_history(created_at DESC)`,
     db`CREATE TABLE IF NOT EXISTS conversation_summary (
       id SERIAL PRIMARY KEY,
       telegram_id BIGINT UNIQUE,

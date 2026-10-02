@@ -367,7 +367,10 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
       console.log(`📨 Telegram message from ${userId}: "${queryText}"`);
 
       // History is loaded/persisted inside handleConversationalChat via userContext
-      const responseText = await handleConversationalChat(queryText, [], { telegramId: userId }, undefined, images);
+      const from = messageObj.from;
+      const displayName = [[from.first_name, from.last_name].filter(Boolean).join(' '), from.username ? `@${from.username}` : '']
+        .filter(Boolean).join(' ').trim();
+      const responseText = await handleConversationalChat(queryText, [], { telegramId: userId, displayName: displayName || undefined, voice: isVoice }, undefined, images);
 
       let finalResponseText = responseText;
       let imageUrls: string[] = [];

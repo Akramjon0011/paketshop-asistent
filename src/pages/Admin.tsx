@@ -1,21 +1,14 @@
 import { useState, useEffect } from 'react';
-import { Shield, Key, Plus, Trash2, Database, AlertCircle, Loader2, Package, ShoppingBag, Eye, CheckCircle, Clock, Truck, XCircle, Pencil, X, Users, BarChart3, TrendingUp, DollarSign, ExternalLink, HelpCircle } from 'lucide-react';
+import { Shield, Key, Plus, Trash2, Database, AlertCircle, Loader2, Package, ShoppingBag, Eye, CheckCircle, Clock, Truck, XCircle, Pencil, X, Users, BarChart3, TrendingUp, DollarSign, ExternalLink, HelpCircle, MessagesSquare } from 'lucide-react';
+import { CRM_STATUS, SITE_ADMIN_URL } from '../lib/requestStatus';
+import ConversationsPanel from '../components/ConversationsPanel';
 
-type Tab = 'analytics' | 'knowledge' | 'products' | 'orders' | 'customers' | 'gaps';
+type Tab = 'analytics' | 'knowledge' | 'products' | 'orders' | 'customers' | 'conversations' | 'gaps';
 
 type GapGroup = { kind: string; topic: string; count: number; last_at: string; channels: string[]; questions: string[] };
 
 const CHANNEL_LABELS: Record<string, string> = { telegram: 'Telegram', web: 'Mini App', site: 'Sayt', api: 'API' };
 
-// Lead statuses of the paketshop.uz CRM, worded as on the site's "Leadlar" page
-const CRM_STATUS: Record<string, { label: string; tone: string }> = {
-  NEW: { label: 'Yangi', tone: 'bg-blue-50 text-blue-700 border-blue-100' },
-  CONTACTED: { label: "Bog'lanildi", tone: 'bg-amber-50 text-amber-700 border-amber-100' },
-  IN_PROGRESS: { label: 'Jarayonda', tone: 'bg-purple-50 text-purple-700 border-purple-100' },
-  WON: { label: 'Yutildi', tone: 'bg-green-50 text-green-700 border-green-100' },
-  LOST: { label: "Yo'qotildi", tone: 'bg-red-50 text-red-700 border-red-100' },
-};
-const SITE_ADMIN_URL = 'https://www.paketshop.uz/uz/admin';
 
 type OutcomeStatus = 'NEW' | 'CONTACTED' | 'IN_PROGRESS' | 'WON' | 'LOST';
 
@@ -599,6 +592,14 @@ export default function Admin() {
             }`}
           >
             <Users className="w-4 h-4" /> Mijozlar
+          </button>
+          <button
+            onClick={() => setActiveTab('conversations')}
+            className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-bold transition-all relative ${
+              activeTab === 'conversations' ? 'bg-amber-500 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            <MessagesSquare className="w-4 h-4" /> Suhbatlar
           </button>
           <button
             onClick={() => setActiveTab('gaps')}
@@ -1300,6 +1301,8 @@ export default function Admin() {
         )}
 
         {/* --- TAB 5: UNANSWERED QUESTIONS --- */}
+        {activeTab === 'conversations' && <ConversationsPanel token={token} />}
+
         {activeTab === 'gaps' && (
           <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden animate-fadeIn">
             <div className="p-6 border-b border-gray-100 flex justify-between items-start gap-4 bg-gray-50">
