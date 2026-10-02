@@ -483,8 +483,8 @@ export default function Chat() {
             </div>
             <div>
               <h1 className="text-xl font-bold tracking-tight">{brand.shopName}</h1>
-              <p className="text-amber-100 text-sm flex items-center">
-                <Sparkles className="w-3 h-3 mr-1" /> {brand.assistantName} (Raqamli yordamchi)
+              <p className="text-amber-100 text-sm flex items-center whitespace-nowrap">
+                <Sparkles className="w-3 h-3 mr-1" /> {brand.assistantName} · AI yordamchi
               </p>
             </div>
           </div>
@@ -608,7 +608,7 @@ export default function Chat() {
                 </div>
                 <div className="flex gap-2.5 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
                   {strip.map(p => (
-                    <ProductTile key={p.id} product={p} onAsk={askAbout} className="w-24 sm:w-28 shrink-0" />
+                    <ProductTile key={p.id} product={p} onAsk={askAbout} className="w-28 shrink-0" />
                   ))}
                 </div>
               </>
