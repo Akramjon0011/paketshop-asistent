@@ -106,7 +106,9 @@ export function catalogTile(r: Row) {
     id: r.id,
     sku: r.sku,
     name: r.name,
+    name_ru: r.name_ru || null,
     category: r.category ?? null,
+    category_ru: r.category_ru || null,
     price,
     price_from: !!(price && r.price_from),
     pack_unit: r.pack_unit || 'qadoq',
@@ -120,8 +122,8 @@ export function catalogTile(r: Row) {
 }
 
 export async function catalogTiles(db: Sql) {
-  const rows = await db`SELECT id, sku, name, category, price, price_on_request, price_from, pack_unit, pack_qty, unit_price,
-                          stock_note, availability, image_url, url, variants
+  const rows = await db`SELECT id, sku, name, name_ru, category, category_ru, price, price_on_request, price_from, pack_unit, pack_qty,
+                          unit_price, stock_note, availability, image_url, url, variants
                         FROM products WHERE active ORDER BY category, name`;
   return rows.map(catalogTile);
 }

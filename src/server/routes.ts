@@ -2,7 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import { v2 as cloudinary } from 'cloudinary';
 import { sql, initDb } from './db.js';
-import { generateEmbedding, generateEmbeddingsBatch, searchKnowledgeBase, handleConversationalChat, handleConversationalChatStream, transcribeAudio, generateSpeech, generateSpeechDetailed, TTS_MODELS, BRAND, BRAND_GREETING, appendHistory, type ChatUserContext } from './ai.js';
+import { generateEmbedding, generateEmbeddingsBatch, searchKnowledgeBase, handleConversationalChat, handleConversationalChatStream, transcribeAudio, generateSpeech, generateSpeechDetailed, TTS_MODELS, BRAND, BRAND_GREETING, BRAND_GREETING_RU, appendHistory, type ChatUserContext } from './ai.js';
 import { runScheduledSync } from './scheduledSync.js';
 import { catalogTiles } from './catalog.js';
 import { gapGroups, maybeSendWeeklyDigest, resolveGap } from './gaps.js';
@@ -90,7 +90,9 @@ router.get("/config", (_req, res) => {
   res.json({
     shopName: BRAND.shopName,
     assistantName: BRAND.assistantName,
+    assistantNameRu: BRAND.assistantNameRu,
     greeting: BRAND_GREETING,
+    greetingRu: BRAND_GREETING_RU,
     brandColor: BRAND.brandColor,
     currency: BRAND.currency,
   });
@@ -415,6 +417,10 @@ router.post("/knowledge/reindex", requireAdmin, async (req, res) => {
 
 // --- Conversational Commerce Routes ---
 
+// The customer's interface language (Mini App toggle, site locale): helps when a message alone does not show it
+const languageOf = (value: unknown): ChatUserContext['language'] =>
+  value === 'uz' || value === 'ru' || value === 'en' ? value : undefined;
+
 // 1. Chat with Malika (Conversational E-Commerce)
 router.post("/chat", aiLimiter, async (req, res) => {
   const { message, history, webSessionId, language, customerName } = req.body;
@@ -422,7 +428,7 @@ router.post("/chat", aiLimiter, async (req, res) => {
   try {
     const context: ChatUserContext = {
       webSessionId,
-      language: language === 'uz' || language === 'ru' || language === 'en' ? language : undefined,
+      language: languageOf(language),
       customerName: typeof customerName === 'string' ? customerName : undefined,
     };
     const replyText = await handleConversationalChat(message, history || [], context);
@@ -447,7 +453,7 @@ router.post("/chat", aiLimiter, async (req, res) => {
 
 // 1.2. Streaming chat (SSE) — text appears progressively
 router.post("/chat/stream", aiLimiter, async (req, res) => {
-  const { message, history, webSessionId } = req.body;
+  const { message, history, webSessionId, language } = req.body;
   if (!message) {
     res.status(400).json({ error: "Xabar majburiy" });
     return;
@@ -468,7 +474,7 @@ router.post("/chat/stream", aiLimiter, async (req, res) => {
     const fullText = await handleConversationalChatStream(
       message,
       history || [],
-      { webSessionId },
+      { webSessionId, language: languageOf(language) },
       (chunk) => writeEvent('chunk', { text: chunk })
     );
     writeEvent('done', { reply: fullText });
@@ -517,7 +523,7 @@ router.post("/chat/voice", aiLimiter, uploadMemory.single('audio'), async (req, 
     return res.status(400).json({ error: "Audio fayl yuborilmadi" });
   }
   
-  const { webSessionId } = req.body;
+  const { webSessionId, language } = req.body;
   let history: any[] = [];
   if (req.body.history) {
     try {
@@ -543,7 +549,7 @@ router.post("/chat/voice", aiLimiter, uploadMemory.single('audio'), async (req, 
 
     // 2. Feed text into conversational chat
     const chatStart = Date.now();
-    const replyText = await handleConversationalChat(transcribedText, history, { webSessionId });
+    const replyText = await handleConversationalChat(transcribedText, history, { webSessionId, language: languageOf(language) });
     res.set('Server-Timing', `stt;dur=${sttMs}, chat;dur=${Date.now() - chatStart}`);
 
     // The reply text is returned right away; the client requests the voice separately via /api/tts
@@ -564,15 +570,17 @@ router.post("/chat/image", aiLimiter, uploadMemory.single('image'), async (req, 
   if (!req.file || !/^image\/(jpeg|png|webp)$/i.test(req.file.mimetype)) {
     return res.status(400).json({ error: "Faqat rasm (JPG, PNG yoki WEBP) yuboring" });
   }
-  const { webSessionId } = req.body;
+  const { webSessionId, language } = req.body;
   const caption = String(req.body.message || '').trim().slice(0, 500)
-    || "Mijoz mahsulot rasmini yubordi. Katalogda shunga o'xshash mahsulot bormi?";
+    || (languageOf(language) === 'ru'
+      ? "Клиент прислал фото товара. Есть ли в каталоге похожий товар?"
+      : "Mijoz mahsulot rasmini yubordi. Katalogda shunga o'xshash mahsulot bormi?");
   let history: any[] = [];
   if (req.body.history) {
     try { history = JSON.parse(req.body.history); } catch { /* ignore a malformed history */ }
   }
   try {
-    const reply = await handleConversationalChat(caption, history, { webSessionId }, undefined,
+    const reply = await handleConversationalChat(caption, history, { webSessionId, language: languageOf(language) }, undefined,
       [{ data: req.file.buffer.toString('base64'), mimeType: req.file.mimetype }]);
     res.json({ reply });
   } catch (err) {

@@ -132,18 +132,22 @@ export async function generateContentStreamResilient(params: Parameters<typeof a
 export const BRAND = {
   shopName: process.env.SHOP_NAME || "Paketshop.uz",
   assistantName: process.env.ASSISTANT_NAME || "Malika",
+  // The name as Russian-speaking customers see it in the Mini App
+  assistantNameRu: process.env.ASSISTANT_NAME_RU || (process.env.ASSISTANT_NAME ? process.env.ASSISTANT_NAME : "Малика"),
   assistantPersona: process.env.ASSISTANT_PERSONA || "samimiy o'zbek qizisan",
   greeting: process.env.ASSISTANT_GREETING || "Assalomu alaykum! Men {assistant}, {shop} yordamchisiman. Bir martalik idishlar va qadoqlash materiallari bo'yicha mos mahsulot tanlash, narx va miqdorni hisoblashda yordam beraman. Qanday mahsulot kerak?",
+  greetingRu: process.env.ASSISTANT_GREETING_RU || "Здравствуйте! Я {assistant}, помощник {shop}. Помогу подобрать одноразовую посуду и упаковку, рассчитать цену и количество. Что вам нужно?",
   brandColor: process.env.BRAND_COLOR || "amber",
   currency: process.env.CURRENCY || "so'm",
 };
 
-function renderGreeting(template: string): string {
+function renderGreeting(template: string, assistantName = BRAND.assistantName): string {
   return template
-    .replace(/\{assistant\}/g, BRAND.assistantName)
+    .replace(/\{assistant\}/g, assistantName)
     .replace(/\{shop\}/g, BRAND.shopName);
 }
 export const BRAND_GREETING = renderGreeting(BRAND.greeting);
+export const BRAND_GREETING_RU = renderGreeting(BRAND.greetingRu, BRAND.assistantNameRu);
 
 // Built per request because it contains the current Tashkent time (open/closed hours)
 export function buildSystemInstruction(): string {
@@ -316,7 +320,7 @@ const LANGUAGE_NAMES = { uz: "o'zbek", ru: 'rus', en: 'ingliz' } as const;
 function clientHints(ctx?: ChatUserContext): string {
   const lines: string[] = [];
   if (ctx?.language && ctx.language in LANGUAGE_NAMES) {
-    lines.push(`Mijoz sayt interfeysini ${LANGUAGE_NAMES[ctx.language]} tilida ochgan. Xabarning tili aniq bo'lmasa (bitta so'z, raqam), shu tilda javob ber; aks holda xabar tiliga amal qil.`);
+    lines.push(`Mijoz ilova yoki sayt interfeysini ${LANGUAGE_NAMES[ctx.language]} tilida ishlatmoqda. Xabarning tili aniq bo'lmasa (bitta so'z, raqam, mahsulot kodi), shu tilda javob ber; aks holda xabar tiliga amal qil.`);
   }
   const name = ctx?.customerName?.replace(/\s+/g, ' ').trim().slice(0, 100);
   if (name) lines.push(`Mijoz o'zini "${name}" deb tanishtirgan.`);

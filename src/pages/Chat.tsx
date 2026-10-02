@@ -3,7 +3,8 @@ import { useSearchParams } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import { Send, User, Package, Sparkles, Volume2, VolumeX, Mic, Square, Paperclip, LayoutGrid } from 'lucide-react';
 import { generateSpeech } from '../services/geminiService';
-import { featuredProducts, loadCatalog, type CatalogProduct } from '../lib/catalog';
+import { featuredProducts, loadCatalog, productName, type CatalogProduct } from '../lib/catalog';
+import { detectLang, saveLang, STRINGS, type Lang } from '../lib/i18n';
 import { ProductCardInline, ProductTile } from '../components/ProductTile';
 import CatalogSheet from '../components/CatalogSheet';
 
@@ -45,32 +46,33 @@ function getAudioContext() {
 type BrandConfig = {
   shopName: string;
   assistantName: string;
+  assistantNameRu?: string;
   greeting: string;
+  greetingRu?: string;
   brandColor: string;
   currency: string;
 };
 
-// Quick-start questions shown before the first message
-const SUGGESTIONS = [
-  "Kafe uchun stakan va qopqoq kerak",
-  "Kraft paketlar qanday o'lchamlarda?",
-  "Ulgurji narxlar qanday ishlaydi?",
-  "Yetkazib berish shartlari",
-  "Menejer bilan bog'lanish",
-];
-
 const DEFAULT_BRAND: BrandConfig = {
   shopName: "Paketshop.uz",
   assistantName: "Malika",
+  assistantNameRu: "Малика",
   greeting: "Salom! Sizga qanday yordam bera olaman?",
+  greetingRu: "Здравствуйте! Чем могу помочь?",
   brandColor: "amber",
   currency: "so'm",
 };
 
+const greetingFor = (brand: BrandConfig, lang: Lang) => (lang === 'ru' && brand.greetingRu) || brand.greeting;
+
 export default function Chat() {
+  // Interface language (the assistant itself answers in whatever language the customer writes)
+  const [lang, setLang] = useState<Lang>(() => detectLang());
+  const t = STRINGS[lang];
   const [brand, setBrand] = useState<BrandConfig>(DEFAULT_BRAND);
-  const [messages, setMessages] = useState<Message[]>([
-    { id: '1', role: 'model', content: DEFAULT_BRAND.greeting }
+  const assistantName = (lang === 'ru' && brand.assistantNameRu) || brand.assistantName;
+  const [messages, setMessages] = useState<Message[]>(() => [
+    { id: '1', role: 'model', content: greetingFor(DEFAULT_BRAND, lang) }
   ]);
   const [searchParams] = useSearchParams();
   const [input, setInput] = useState(() => searchParams.get('q') ?? '');
@@ -97,15 +99,23 @@ export default function Chat() {
   useEffect(() => {
     fetch('/api/config')
       .then(r => r.ok ? r.json() : null)
-      .then((cfg: BrandConfig | null) => {
-        if (!cfg) return;
-        setBrand(cfg);
-        setMessages(prev => prev.length === 1 && prev[0].id === '1'
-          ? [{ id: '1', role: 'model', content: cfg.greeting }]
-          : prev);
-      })
+      .then((cfg: BrandConfig | null) => { if (cfg) setBrand(cfg); })
       .catch(() => { /* keep defaults */ });
   }, []);
+
+  // The greeting follows the interface language until the conversation starts
+  useEffect(() => {
+    setMessages(prev => prev.length === 1 && prev[0].id === '1'
+      ? [{ id: '1', role: 'model', content: greetingFor(brand, lang) }]
+      : prev);
+    document.documentElement.lang = lang;
+  }, [brand, lang]);
+
+  const switchLang = () => {
+    const next: Lang = lang === 'uz' ? 'ru' : 'uz';
+    setLang(next);
+    saveLang(next);
+  };
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -197,7 +207,8 @@ export default function Chat() {
         body: JSON.stringify({
           message: userMessage.content,
           history: chatHistory,
-          webSessionId: webSessionId
+          webSessionId: webSessionId,
+          language: lang
         })
       });
 
@@ -269,7 +280,7 @@ export default function Chat() {
 
     } catch (err: any) {
       console.error(err);
-      setError("Kechirasiz, javob olishda xatolik yuz berdi. Iltimos qaytadan urinib ko'ring.");
+      setError(t.chatFailed);
     } finally {
       setIsLoading(false);
     }
@@ -278,7 +289,7 @@ export default function Chat() {
   // A tapped product becomes a question to the assistant (it answers with price, pieces, stock and can calculate)
   const askAbout = (p: CatalogProduct) => {
     setCatalogOpen(false);
-    const question = `${p.name} haqida ma'lumot bering`;
+    const question = t.askAbout(productName(p, lang));
     if (isLoading || isRecording) setInput(question);
     else sendMessageText(question);
   };
@@ -321,7 +332,7 @@ export default function Chat() {
       setIsRecording(true);
     } catch (err) {
       console.error("Mic access denied or error:", err);
-      setError("Mikrofondan foydalanishga ruxsat berilmadi yoki xatolik yuz berdi.");
+      setError(t.micDenied);
     }
   };
 
@@ -347,6 +358,7 @@ export default function Chat() {
     formData.append('audio', audioBlob, 'voice.webm');
     formData.append('webSessionId', webSessionId);
     formData.append('history', JSON.stringify(chatHistory));
+    formData.append('language', lang);
 
     try {
       const res = await fetch('/api/chat/voice', {
@@ -355,22 +367,22 @@ export default function Chat() {
       });
 
       if (!res.ok) {
-        throw new Error("Ovozli xabarni yuborib bo'lmadi.");
+        throw new Error(t.voiceFailed);
       }
 
       const data = await res.json();
-      
+
       // Add transcription to chat history as user message
       const userMessageId = Date.now().toString();
       const userMessage: Message = {
         id: userMessageId,
         role: 'user',
-        content: data.transcription || "[Ovozli xabar]"
+        content: data.transcription || t.voiceFallback
       };
 
       // Add response to chat history
       const modelMessageId = (Date.now() + 1).toString();
-      const replyText = data.reply || "Kechirasiz, men tushuna olmadim.";
+      const replyText = data.reply || t.notUnderstood;
       
       setMessages(prev => [
         ...prev,
@@ -385,7 +397,7 @@ export default function Chat() {
         .catch(audioErr => console.error("TTS generation failed after voice message:", audioErr));
     } catch (err: any) {
       console.error(err);
-      setError("Ovozli xabarni qayta ishlashda xatolik yuz berdi.");
+      setError(t.voiceFailed);
     } finally {
       setIsLoading(false);
     }
@@ -396,14 +408,14 @@ export default function Chat() {
   // Photo of a product ("do you have this?"): shown in the chat, answered by the assistant
   const handleImageSelected = async (file: File | undefined) => {
     if (!file || isLoading) return;
-    if (!/^image\//.test(file.type)) { setError("Faqat rasm yuboring (JPG, PNG yoki WEBP)."); return; }
+    if (!/^image\//.test(file.type)) { setError(t.imageOnly); return; }
     setError(null);
     stopCurrentAudio();
 
     const caption = input.trim();
     setInput('');
     const previewUrl = URL.createObjectURL(file);
-    setMessages(prev => [...prev, { id: Date.now().toString(), role: 'user', content: caption || "Shunday mahsulot bormi?", imageUrl: previewUrl }]);
+    setMessages(prev => [...prev, { id: Date.now().toString(), role: 'user', content: caption || t.imageCaption, imageUrl: previewUrl }]);
     setIsLoading(true);
 
     try {
@@ -413,12 +425,13 @@ export default function Chat() {
       formData.append('message', caption);
       formData.append('webSessionId', webSessionId);
       formData.append('history', JSON.stringify(messages.map(m => ({ role: m.role, content: m.content }))));
+      formData.append('language', lang);
 
       const res = await fetch('/api/chat/image', { method: 'POST', body: formData });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || "Rasmni yuborib bo'lmadi.");
+      if (!res.ok) throw new Error(t.imageFailed);
 
-      const replyText = data.reply || "Kechirasiz, rasmni tushuna olmadim.";
+      const replyText = data.reply || t.notUnderstood;
       const modelMessageId = (Date.now() + 1).toString();
       setMessages(prev => [...prev, { id: modelMessageId, role: 'model', content: replyText }]);
       setIsLoading(false);
@@ -429,7 +442,7 @@ export default function Chat() {
       }
     } catch (err: any) {
       console.error(err);
-      setError(err.message || "Rasmni qayta ishlashda xatolik yuz berdi.");
+      setError(t.imageFailed);
     } finally {
       setIsLoading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -446,12 +459,12 @@ export default function Chat() {
     setError(null);
     try {
       const res = await fetch(`/api/products/${productId}`);
-      if (!res.ok) throw new Error("Mahsulot ma'lumotlarini yuklab bo'lmadi.");
+      if (!res.ok) throw new Error(String(res.status));
       const product = await res.json();
       if (product.url) window.open(product.url, '_blank', 'noopener');
     } catch (err: any) {
       console.error(err);
-      setError(err.message || "Xatolik yuz berdi.");
+      setError(t.productLoadFailed);
     }
   };
 
@@ -486,7 +499,7 @@ export default function Chat() {
             <div>
               <h1 className="text-xl font-bold tracking-tight">{brand.shopName}</h1>
               <p className="text-amber-100 text-sm flex items-center whitespace-nowrap">
-                <Sparkles className="w-3 h-3 mr-1" /> {brand.assistantName} · AI yordamchi
+                <Sparkles className="w-3 h-3 mr-1" /> {t.subtitle(assistantName)}
               </p>
             </div>
           </div>
@@ -495,10 +508,19 @@ export default function Chat() {
               type="button"
               onClick={() => setCatalogOpen(true)}
               className="bg-white/20 hover:bg-white/30 px-3 py-2 rounded-full transition-colors flex items-center gap-1.5 text-sm font-semibold cursor-pointer"
-              title="Mahsulotlar katalogi"
+              title={t.catalogTitle}
             >
               <LayoutGrid className="w-4 h-4" />
-              <span className="max-[360px]:hidden">Katalog</span>
+              <span className="max-[400px]:hidden">{t.catalog}</span>
+            </button>
+            <button
+              type="button"
+              onClick={switchLang}
+              className="bg-white/20 hover:bg-white/30 h-9 px-2.5 rounded-full transition-colors text-xs font-bold tracking-wide cursor-pointer"
+              title={t.switchLangTitle}
+              aria-label={t.switchLangTitle}
+            >
+              {t.switchLang}
             </button>
             <button
                onClick={() => {
@@ -506,7 +528,7 @@ export default function Chat() {
                    if (isAudioEnabled) stopCurrentAudio();
                }}
                className="bg-white/20 hover:bg-white/30 p-2 rounded-full transition-colors flex items-center justify-center shrink-0"
-               title={isAudioEnabled ? "Ovozni o'chirish" : "Javoblarni ovoz bilan o'qish"}
+               title={isAudioEnabled ? t.soundOff : t.soundOn}
             >
                {isAudioEnabled ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5 opacity-70" />}
             </button>
@@ -549,7 +571,7 @@ export default function Chat() {
                   {message.role === 'model' && getMessageOrderId(message.content) && (
                     productsById.get(getMessageOrderId(message.content)!) ? (
                       <div className="mt-3">
-                        <ProductCardInline product={productsById.get(getMessageOrderId(message.content)!)!} />
+                        <ProductCardInline product={productsById.get(getMessageOrderId(message.content)!)!} lang={lang} />
                       </div>
                     ) : (
                       <div className="mt-3.5 pt-3 border-t border-gray-100 flex justify-end">
@@ -558,7 +580,7 @@ export default function Chat() {
                           className="bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white font-bold text-xs py-2 px-4 rounded-xl shadow transition-all flex items-center gap-1.5 cursor-pointer hover:scale-[1.02]"
                         >
                           <Package className="w-3.5 h-3.5" />
-                          Mahsulot sahifasi
+                          {t.productPage}
                         </button>
                       </div>
                     )
@@ -599,24 +621,24 @@ export default function Chat() {
             {strip.length > 0 && (
               <>
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-gray-500 uppercase tracking-wide">Mahsulotlar</span>
+                  <span className="text-xs font-bold text-gray-500 uppercase tracking-wide">{t.products}</span>
                   <button
                     type="button"
                     onClick={() => setCatalogOpen(true)}
                     className="text-xs font-semibold text-amber-700 hover:underline cursor-pointer"
                   >
-                    Barchasi ({catalog?.length ?? strip.length}) →
+                    {t.all(catalog?.length ?? strip.length)}
                   </button>
                 </div>
                 <div className="flex gap-2.5 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
                   {strip.map(p => (
-                    <ProductTile key={p.id} product={p} onAsk={askAbout} compact className="w-28 shrink-0" />
+                    <ProductTile key={p.id} product={p} lang={lang} onAsk={askAbout} compact className="w-28 shrink-0" />
                   ))}
                 </div>
               </>
             )}
             <div className="flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-              {SUGGESTIONS.map(q => (
+              {t.suggestions.map(q => (
                 <button
                   key={q}
                   type="button"
@@ -633,6 +655,7 @@ export default function Chat() {
 
       <CatalogSheet
         open={catalogOpen}
+        lang={lang}
         products={catalog}
         failed={catalogFailed}
         onRetry={fetchCatalog}
@@ -661,8 +684,8 @@ export default function Chat() {
               onClick={() => fileInputRef.current?.click()}
               disabled={isLoading || isRecording}
               className="bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-xl p-3 sm:p-4 transition-colors flex-shrink-0 flex items-center justify-center h-[56px] w-[56px] disabled:opacity-50 shadow-sm"
-              title="Mahsulot rasmini yuborish"
-              aria-label="Rasm yuborish"
+              title={t.sendPhoto}
+              aria-label={t.sendPhoto}
             >
               <Paperclip className="w-5 h-5 sm:w-6 sm:h-6" />
             </button>
@@ -675,7 +698,7 @@ export default function Chat() {
                   handleSubmit(e);
                 }
               }}
-              placeholder={isRecording ? "Ovoz yozilmoqda... To'xtatish uchun qizil tugmani bosing." : `${brand.assistantName}ga xabar yozing...`}
+              placeholder={isRecording ? t.recording : t.placeholder(assistantName)}
               disabled={isRecording}
               className="flex-1 max-h-32 min-h-[56px] resize-none bg-gray-50 border border-gray-300 rounded-xl px-4 py-3 sm:py-4 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500 transition-all text-sm sm:text-base text-gray-900 placeholder:text-gray-400 m-0 disabled:bg-gray-100 disabled:text-gray-400"
               rows={1}
@@ -685,7 +708,7 @@ export default function Chat() {
                 type="button"
                 onClick={stopRecording}
                 className="bg-red-500 hover:bg-red-600 text-white rounded-xl p-3 sm:p-4 transition-colors flex-shrink-0 flex items-center justify-center flex-col h-[56px] w-[56px] animate-pulse shadow-md"
-                title="Yozishni to'xtatish va yuborish"
+                title={t.stopVoice}
               >
                 <Square className="w-5 h-5 sm:w-6 sm:h-6" />
               </button>
@@ -695,7 +718,7 @@ export default function Chat() {
                 onClick={startRecording}
                 disabled={isLoading}
                 className="bg-amber-100 hover:bg-amber-200 text-amber-600 rounded-xl p-3 sm:p-4 transition-colors flex-shrink-0 flex items-center justify-center flex-col h-[56px] w-[56px] disabled:opacity-50 shadow-sm"
-                title="Ovozli xabar yuborish"
+                title={t.sendVoice}
               >
                 <Mic className="w-5 h-5 sm:w-6 sm:h-6" />
               </button>
@@ -709,7 +732,7 @@ export default function Chat() {
             </button>
           </form>
           <div className="text-center text-xs text-gray-400 pt-2 flex flex-col sm:flex-row justify-center items-center gap-1">
-            <span>{brand.shopName} sun'iy intellekt yordamchisi. Ayrim javoblarda noaniqliklar bo'lishi mumkin.</span>
+            <span>{t.footer(brand.shopName)}</span>
           </div>
         </div>
       </footer>
