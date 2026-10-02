@@ -66,6 +66,46 @@ function describeErr(err: any): string {
   return err?.response?.description ? `${err.response.error_code} ${err.response.description}` : String(err?.message || err);
 }
 
+// Fixed bot texts follow the customer's Telegram language. The assistant's own answers follow the language the
+// customer writes in, so the greeting also says, in the other language, that both languages are fine.
+type BotLang = 'uz' | 'ru';
+const RUSSIAN_SPEAKING = ['ru', 'be', 'uk', 'kk', 'ky', 'tg'];
+const langOf = (code?: string): BotLang =>
+  RUSSIAN_SPEAKING.some(prefix => (code ?? '').toLowerCase().startsWith(prefix)) ? 'ru' : 'uz';
+// Language of an answer: more Cyrillic than Latin letters means Russian
+const textLang = (text: string): BotLang =>
+  (text.match(/[а-яё]/gi)?.length ?? 0) > (text.match(/[a-z]/gi)?.length ?? 0) ? 'ru' : 'uz';
+const ruPage = (url: string) => url.replace(/^(https:\/\/[^/]+)\/uz(?=\/|$)/, '$1/ru');
+
+const BOT_TEXT = {
+  uz: {
+    welcome: () => `Assalomu alaykum! Men ${BRAND.assistantName}, PaketShop.uz yordamchisiman. Bir martalik idish va qadoqlash materiallari bo'yicha mos mahsulot tanlashda va narxni hisoblashda yordam beraman. Qanday mahsulot kerak?\n\nПишите по-русски — отвечу по-русски.`,
+    openApp: '💬 Yordamchini ochish',
+    openAppHint: 'Yordamchini ochish uchun quyidagi tugmani bosing:',
+    reset: 'Suhbat tarixi tozalandi. Yangidan boshlaymiz!',
+    youSaid: (text: string) => `🎙️ Siz: "${text}"`,
+    voiceFailed: "Kechirasiz, ovozli xabarni eshita olmadim. Iltimos, qayta yozib ko'ring yoki matn yuboring.",
+    imageTooBig: 'Rasm juda katta. Iltimos, kichikroq rasm yuboring.',
+    photoQuestion: "Mijoz mahsulot rasmini yubordi. Katalogda shunga o'xshash mahsulot bormi?",
+    error: "Uzur, texnik xatolik yuz berdi. Iltimos qaytadan urinib ko'ring.",
+    openOnSite: "🔗 Saytda ko'rish",
+    video: 'Batafsil video: ',
+  },
+  ru: {
+    welcome: () => `Здравствуйте! Я ${BRAND.assistantNameRu}, помощник PaketShop.uz. Помогу подобрать одноразовую посуду и упаковку, рассчитать цену и количество. Какой товар вам нужен?\n\nO'zbekcha yozsangiz, o'zbekcha javob beraman.`,
+    openApp: '💬 Открыть помощника',
+    openAppHint: 'Нажмите кнопку ниже, чтобы открыть помощника:',
+    reset: 'История диалога очищена. Начнём заново!',
+    youSaid: (text: string) => `🎙️ Вы: "${text}"`,
+    voiceFailed: 'Извините, не удалось разобрать голосовое сообщение. Запишите ещё раз или напишите текстом.',
+    imageTooBig: 'Фото слишком большое. Отправьте, пожалуйста, фото поменьше.',
+    photoQuestion: 'Клиент прислал фото товара. Есть ли в каталоге похожий товар?',
+    error: 'Извините, произошла техническая ошибка. Попробуйте ещё раз.',
+    openOnSite: '🔗 Открыть на сайте',
+    video: 'Видео: ',
+  },
+};
+
 // The product an answer recommends ([BUYURTMA: id]): its photo and page, so the Telegram reply can show the product.
 // Business chats keep plain text messages.
 async function recommendedProduct(text: string, businessChat: boolean): Promise<{ image: string | null; url: string | null } | null> {
@@ -190,7 +230,7 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
         console.error("Reset history error:", err);
       }
     }
-    await ctx.reply("Suhbat tarixi tozalandi. Yangidan boshlaymiz!");
+    await ctx.reply(BOT_TEXT[langOf(ctx.from?.language_code)].reset);
   });
 
   const getWebAppButton = (text: string, url: string) => {
@@ -201,22 +241,24 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
 
   bot.command('webapp', async (ctx) => {
     const webAppUrl = process.env.APP_URL || "http://localhost:3000";
-    await ctx.reply("Yordamchini ochish uchun quyidagi tugmani bosing:", 
+    const text = BOT_TEXT[langOf(ctx.from?.language_code)];
+    await ctx.reply(text.openAppHint,
       Markup.inlineKeyboard([
-        [getWebAppButton("💬 Yordamchini ochish", webAppUrl)]
+        [getWebAppButton(text.openApp, webAppUrl)]
       ])
     );
   });
 
   bot.start(async (ctx) => {
-    const welcomeText = `Assalomu alaykum! Men ${BRAND.assistantName}, PaketShop.uz yordamchisiman. Bir martalik idish va qadoqlash materiallari bo'yicha mos mahsulot tanlashda va narxni hisoblashda yordam beraman. Qanday mahsulot kerak?`;
+    const text = BOT_TEXT[langOf(ctx.from?.language_code)];
+    const welcomeText = text.welcome();
     const appUrl = process.env.APP_URL || "http://localhost:3000";
     
     // Try sending with inline button, fallback to plain text if Telegram rejects the URL
     try {
       if (appUrl.startsWith('https://')) {
         await ctx.reply(welcomeText, Markup.inlineKeyboard([
-          [getWebAppButton("\ud83d\udcac Yordamchini ochish", appUrl)]
+          [getWebAppButton(text.openApp, appUrl)]
         ]));
       } else {
         // http:// URL — Telegram rejects inline URL buttons for non-HTTPS, send plain text
@@ -246,6 +288,7 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
     if (!messageObj || !messageObj.from) return;
     const userId = messageObj.from.id;
     const chatId = messageObj.chat.id;
+    const text = BOT_TEXT[langOf(messageObj.from.language_code)];
 
     // Helper options for Telegram Business context
     const replyOptions = businessConnectionId ? { business_connection_id: businessConnectionId } : {};
@@ -277,16 +320,12 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
         const transcribedText = await transcribeAudio(audioBuffer, mimeType);
 
         if (!transcribedText) {
-          await ctx.telegram.sendMessage(
-            chatId, 
-            "Kechirasiz, ovozli xabarni eshita olmadim. Iltimos, qayta yozib ko'ring yoki matn yuboring.", 
-            replyOptions
-          );
+          await ctx.telegram.sendMessage(chatId, text.voiceFailed, replyOptions);
           return;
         }
 
         console.log(`🎙️ Transcribed voice message: "${transcribedText}"`);
-        await ctx.telegram.sendMessage(chatId, `🎙️ Siz: "${transcribedText}"`, replyOptions);
+        await ctx.telegram.sendMessage(chatId, text.youSaid(transcribedText), replyOptions);
         queryText = transcribedText;
       } else if (isPhoto) {
         // A photo (or an image sent as a file): let the assistant look at it
@@ -296,11 +335,12 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
         const imgRes = await fetch(link.href, { signal: AbortSignal.timeout(15000) });
         const imgBuffer = Buffer.from(await imgRes.arrayBuffer());
         if (imgBuffer.length > 6 * 1024 * 1024) {
-          await ctx.telegram.sendMessage(chatId, "Rasm juda katta. Iltimos, kichikroq rasm yuboring.", replyOptions);
+          await ctx.telegram.sendMessage(chatId, text.imageTooBig, replyOptions);
           return;
         }
         images = [{ data: imgBuffer.toString('base64'), mimeType: doc?.mime_type || 'image/jpeg' }];
-        queryText = (messageObj.caption || '').trim() || "Mijoz mahsulot rasmini yubordi. Katalogda shunga o'xshash mahsulot bormi?";
+        // A photo without a caption: the question is put in the customer's Telegram language, so the answer is too
+        queryText = (messageObj.caption || '').trim() || text.photoQuestion;
       } else {
         queryText = messageObj.text || "";
       }
@@ -337,14 +377,17 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
           .replace(/\n{3,}/g, '\n\n')
           .trim();
 
+      // Links under the answer speak the answer's language (and open the Russian page for a Russian answer)
+      const answerText = BOT_TEXT[textLang(plainText)];
       if (videoUrls.length > 0) {
-         plainText += "\n\nBatafsil video: " + videoUrls.join(", ");
+         plainText += `\n\n${answerText.video}` + videoUrls.join(", ");
       }
 
       // A recommended product comes with its photo (as the message itself) and a button to its page on paketshop.uz
       const recommended = await recommendedProduct(finalResponseText, !!businessConnectionId);
-      const linkButton = recommended?.url
-        ? { reply_markup: { inline_keyboard: [[{ text: "🔗 Saytda ko'rish", url: recommended.url }]] } }
+      const pageUrl = recommended?.url ? (answerText === BOT_TEXT.ru ? ruPage(recommended.url) : recommended.url) : null;
+      const linkButton = pageUrl
+        ? { reply_markup: { inline_keyboard: [[{ text: answerText.openOnSite, url: pageUrl }]] } }
         : {};
 
       // Send response
@@ -400,7 +443,7 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
       console.error("Bot error in processMessage:", describeErr(err));
       await recordBotEvent('process_error', describeErr(err));
       try {
-        await ctx.telegram.sendMessage(chatId, "Uzur, texnik xatolik yuz berdi. Iltimos qayta urinib ko'ring.", replyOptions);
+        await ctx.telegram.sendMessage(chatId, text.error, replyOptions);
       } catch (sendErr) {
         console.error("Failed to send error message:", sendErr);
       }
