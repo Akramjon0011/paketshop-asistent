@@ -4,10 +4,14 @@
 export const SHOP = {
   phone: process.env.SHOP_PHONE || '+998 99 644 84 44',
   telegram: process.env.SHOP_TELEGRAM || '@paketshop_uz',
+  // whose chat the "📞 Menejer bilan bog'lanish" buttons open (bot and Mini App)
+  managerTelegram: process.env.SHOP_MANAGER_TELEGRAM || '@akramjon0011',
   site: process.env.SHOP_SITE || 'https://www.paketshop.uz',
   hoursText: process.env.SHOP_HOURS || 'Dushanba–Shanba 09:00–20:00 (yakshanba dam olish kuni)',
   city: 'Toshkent',
 };
+
+export const managerUrl = () => `https://t.me/${SHOP.managerTelegram.replace(/^@/, '').trim()}`;
 
 // Business days/hours in Tashkent time (UTC+5, no DST). Mon–Sat 09:00–20:00.
 const TZ = 'Asia/Tashkent';

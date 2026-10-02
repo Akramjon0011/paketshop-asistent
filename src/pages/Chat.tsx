@@ -21,7 +21,8 @@ type Message = {
   actions?: ChatActions;
 };
 
-const MANAGER_URL = 'https://t.me/paketshop_uz';
+// "📞 Menejer bilan bog'lanish": /api/config says whose chat it opens; this is the fallback
+const MANAGER_URL = 'https://t.me/akramjon0011';
 
 // Telegram can share the customer's own number with the bot (Bot API 6.9+); a plain browser cannot
 function telegramApp(): any {
@@ -71,6 +72,7 @@ type BrandConfig = {
   greetingRu?: string;
   brandColor: string;
   currency: string;
+  managerUrl?: string;
 };
 
 const DEFAULT_BRAND: BrandConfig = {
@@ -321,8 +323,9 @@ export default function Chat() {
 
   const openManager = () => {
     const tg = telegramApp();
-    if (tg?.openTelegramLink && tg.initData) tg.openTelegramLink(MANAGER_URL);
-    else window.open(MANAGER_URL, '_blank', 'noopener,noreferrer');
+    const url = brand.managerUrl?.startsWith('https://t.me/') ? brand.managerUrl : MANAGER_URL;
+    if (tg?.openTelegramLink && tg.initData) tg.openTelegramLink(url);
+    else window.open(url, '_blank', 'noopener,noreferrer');
   };
 
   // "🔁 Takrorlash" in the request list: Malika prices the same items at today's prices

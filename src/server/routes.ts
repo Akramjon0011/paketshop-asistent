@@ -13,6 +13,7 @@ import { maybeSendLeadReminder, outcomeSummary, refreshCrmStatuses, waitingReque
 import { conversationDetail, listConversations } from './conversations.js';
 import { customerRequests, repeatableRequest } from './myRequests.js';
 import { verifyInitData } from './telegramAuth.js';
+import { managerUrl } from './shopInfo.js';
 import { timingSafeEqual } from 'crypto';
 import { GoogleGenAI } from "@google/genai";
 import { createRequire } from 'module';
@@ -115,6 +116,7 @@ router.get("/config", (_req, res) => {
     greetingRu: BRAND_GREETING_RU,
     brandColor: BRAND.brandColor,
     currency: BRAND.currency,
+    managerUrl: managerUrl(),
   });
 });
 

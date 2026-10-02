@@ -9,7 +9,7 @@ import { examSummary, runExam, saveExam } from './exam.js';
 import { Mp3Encoder } from '@breezystack/lamejs';
 import { createHash } from 'crypto';
 import { normalizeUzbekPhone } from './siteBridge.js';
-import { SHOP } from './shopInfo.js';
+import { managerUrl } from './shopInfo.js';
 import { customerRequests, formatMyRequests, repeatableRequest } from './myRequests.js';
 
 // Helper to wrap raw 24kHz 16-bit Mono PCM in a standard WAV container for Telegram playback
@@ -545,7 +545,7 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
         const rows: any[][] = [];
         if (pageUrl) rows.push([{ text: answerText.openOnSite, url: pageUrl }]);
         if (canButtons && actions?.quote) {
-          rows.push([{ text: answerText.leaveRequest, callback_data: 'lead' }, { text: answerText.callManager, url: `https://t.me/${SHOP.telegram.replace(/^@/, '')}` }]);
+          rows.push([{ text: answerText.leaveRequest, callback_data: 'lead' }, { text: answerText.callManager, url: managerUrl() }]);
         }
         // otherwise drop a "send my number" keyboard left from an earlier question
         buttons = rows.length ? { reply_markup: { inline_keyboard: rows } } : canButtons ? { reply_markup: { remove_keyboard: true } } : {};
