@@ -613,9 +613,19 @@ router.post("/admin/products", requireAdmin, uploadImageMemory.single('image'), 
   }
 });
 
+// Products imported from paketshop.uz are edited on the site: a change made here would make the assistant quote
+// something else than the site until the next sync silently overwrote it.
+const SYNCED_PRODUCT_MESSAGE = "Bu mahsulot paketshop.uz saytidan sinxronlanadi. Narx va ma'lumotlarni sayt admin panelida o'zgartiring, keyin botda /sync apply qiling.";
+async function isSyncedProduct(id: string): Promise<boolean> {
+  if (!sql || !/^\d+$/.test(id)) return false;
+  const rows = await sql`SELECT source FROM products WHERE id = ${id}`;
+  return rows[0]?.source === 'paketshop.uz';
+}
+
 // 3.5. Admin: Update an existing product
 router.put("/admin/products/:id", requireAdmin, uploadImageMemory.single('image'), async (req, res) => {
   if (!sql) return res.status(500).json({ error: "Database not connected" });
+  if (await isSyncedProduct(req.params.id)) return res.status(409).json({ error: SYNCED_PRODUCT_MESSAGE });
   const { name, description, price, category, stock, remove_image } = req.body;
   if (!name || !price) return res.status(400).json({ error: "Name va Price majburiy" });
 
@@ -734,6 +744,7 @@ router.post("/admin/products/bulk", requireAdmin, uploadImageMemory.single('file
 // 4. Admin: Delete a product
 router.delete("/admin/products/:id", requireAdmin, async (req, res) => {
   if (!sql) return res.status(500).json({ error: "Database not connected" });
+  if (await isSyncedProduct(req.params.id)) return res.status(409).json({ error: SYNCED_PRODUCT_MESSAGE });
   try {
     await sql`DELETE FROM products WHERE id = ${req.params.id}`;
     res.json({ success: true });

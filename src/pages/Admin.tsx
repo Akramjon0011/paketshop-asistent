@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Shield, Key, Plus, Trash2, Database, AlertCircle, Loader2, Package, ShoppingBag, Eye, CheckCircle, Clock, Truck, XCircle, Pencil, X, Users, BarChart3, TrendingUp, DollarSign, Upload } from 'lucide-react';
+import { Shield, Key, Plus, Trash2, Database, AlertCircle, Loader2, Package, ShoppingBag, Eye, CheckCircle, Clock, Truck, XCircle, Pencil, X, Users, BarChart3, TrendingUp, DollarSign, Upload, ExternalLink } from 'lucide-react';
 
 type Tab = 'analytics' | 'knowledge' | 'products' | 'orders' | 'customers';
 
@@ -1055,8 +1055,11 @@ export default function Admin() {
                       <p className="text-sm text-gray-400">Do'koningizni to'ldirish uchun yangi mahsulot qo'shing.</p>
                     </div>
                   ) : (
-                    products.map((item) => (
-                      <div key={item.id} className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden flex flex-col justify-between group hover:shadow-md transition-all">
+                    products.map((item) => {
+                      // Products from paketshop.uz are edited on the site (the assistant only mirrors them)
+                      const synced = item.source === 'paketshop.uz';
+                      return (
+                      <div key={item.id} className={`bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden flex flex-col justify-between group hover:shadow-md transition-all ${item.active === false ? 'opacity-60' : ''}`}>
                         <div>
                           {item.image_url ? (
                             <img src={item.image_url} alt={item.name} className="w-full h-40 object-cover" />
@@ -1066,24 +1069,56 @@ export default function Admin() {
                             </div>
                           )}
                           <div className="p-4 space-y-2">
-                            <span className="bg-gray-100 text-gray-600 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded">
-                              {item.category || "Umumiy"}
-                            </span>
+                            <div className="flex flex-wrap gap-1.5">
+                              <span className="bg-gray-100 text-gray-600 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded">
+                                {item.category || "Umumiy"}
+                              </span>
+                              {synced && (
+                                <span className="bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold px-2 py-0.5 rounded" title="Saytdan sinxronlanadi: saytda o'zgartiriladi">
+                                  paketshop.uz
+                                </span>
+                              )}
+                              {item.active === false && (
+                                <span className="bg-gray-200 text-gray-600 text-[10px] font-bold px-2 py-0.5 rounded">Yashirilgan</span>
+                              )}
+                            </div>
                             <h3 className="font-bold text-gray-900 text-base">{item.name}</h3>
                             <p className="text-gray-500 text-xs line-clamp-2">{item.description || "Tavsif yo'q."}</p>
                           </div>
                         </div>
-                        <div className="p-4 bg-gray-50 border-t border-gray-100 flex items-center justify-between">
+                        <div className="p-4 bg-gray-50 border-t border-gray-100 flex items-center justify-between gap-2">
                           <div>
-                            <span className="text-[10px] font-bold text-gray-400 block">NARXI</span>
-                            <span className="font-extrabold text-amber-600 text-sm">{Number(item.price).toLocaleString()} so'm</span>
-                          </div>
-                          <div>
-                            <span className="text-[10px] font-bold text-gray-400 block text-right">ZAXIRA</span>
-                            <span className={`text-xs font-bold ${item.stock > 0 ? 'text-gray-700' : 'text-red-500'}`}>
-                              {item.stock > 0 ? `${item.stock} ta` : "Qolmagan"}
+                            <span className="text-[10px] font-bold text-gray-400 block">{synced ? `NARXI (1 ${item.pack_unit || 'qadoq'})` : 'NARXI'}</span>
+                            <span className="font-extrabold text-amber-600 text-sm">
+                              {item.price_on_request ? "So'raladi" : `${Number(item.price).toLocaleString()} so'm`}
                             </span>
+                            {synced && item.pack_qty && (
+                              <span className="block text-[11px] text-gray-500">{Number(item.pack_qty).toLocaleString()} dona</span>
+                            )}
                           </div>
+                          <div>
+                            <span className="text-[10px] font-bold text-gray-400 block text-right">{synced ? 'HOLATI' : 'ZAXIRA'}</span>
+                            {synced ? (
+                              <span className="text-xs font-bold text-gray-700">{item.stock_note || 'Qoldiqni aniqlang'}</span>
+                            ) : (
+                              <span className={`text-xs font-bold ${item.stock > 0 ? 'text-gray-700' : 'text-red-500'}`}>
+                                {item.stock > 0 ? `${item.stock} ta` : "Qolmagan"}
+                              </span>
+                            )}
+                          </div>
+                          {synced ? (
+                            item.url && (
+                              <a
+                                href={item.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="p-2 text-gray-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition-all"
+                                title="Saytdan sinxronlanadi: narx va ma'lumotlar sayt admin panelida o'zgartiriladi"
+                              >
+                                <ExternalLink className="w-4 h-4" />
+                              </a>
+                            )
+                          ) : (<>
                           <button
                             onClick={() => setEditingProduct({
                               id: item.id,
@@ -1106,9 +1141,11 @@ export default function Admin() {
                           >
                             <Trash2 className="w-4 h-4" />
                           </button>
+                          </>)}
                         </div>
                       </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
               </div>
