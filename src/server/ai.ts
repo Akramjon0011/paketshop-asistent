@@ -6,6 +6,7 @@ import { recordEvent } from './events.js';
 import { allowNumbersFromText, collectNumbers, findUnverifiedNumbers, formatAmount } from './numberGuard.js';
 import { channelOf, extractGapTags, gapFromTag, recordGaps, type Gap } from './gaps.js';
 import { fetchLeadStatuses } from './siteBridge.js';
+import { storeCrmStatus } from './outcomes.js';
 
 const geminiKey = process.env.GEMINI_API_KEY;
 export const ai = new GoogleGenAI({ apiKey: geminiKey as string });
@@ -321,20 +322,22 @@ async function dbCheckOrderStatus(order_id: number, customerPhone: unknown, db: 
   if (given.length < 9) return { error: "Ask the customer for the phone number given in the request; the status is shown only when it matches" };
   try {
     const data = await db`
-      SELECT id, customer_name, customer_phone, delivery_address, items, total_price, status, created_at, site_lead_id
+      SELECT id, customer_name, customer_phone, delivery_address, items, total_price, status, created_at,
+             site_lead_id, crm_status, crm_updated_at
       FROM orders WHERE id = ${order_id}
     `;
     // One answer for "no such request" and "wrong phone", so request numbers cannot be probed
     if (data.length === 0 || String(data[0].customer_phone ?? '').replace(/\D/g, '').slice(-9) !== given.slice(-9)) {
       return { error: "No request found for this number and phone number" };
     }
-    const { customer_phone: _phone, site_lead_id: leadId, ...order } = data[0];
-    // Requests handed over to paketshop.uz are worked on in the site CRM: its status is the current one.
-    // (The managers' reason for closing a request is internal and is not passed on.)
+    const { customer_phone: _phone, site_lead_id: leadId, crm_status: knownStatus, crm_updated_at: knownAt, ...order } = data[0];
+    // Requests handed over to paketshop.uz are worked on in the site CRM: its status is the current one (the last
+    // known one while the site cannot be asked). The managers' reason for closing a request is internal and is not passed on.
     if (leadId) {
       const lead = (await fetchLeadStatuses([String(leadId)])).get(String(leadId));
-      const code = lead && CRM_STATUS_CODES[lead.status];
-      if (code) return { success: true, order: { ...order, status: code, status_updated_at: lead.updatedAt } };
+      if (lead) await storeCrmStatus(db, order.id, lead);
+      const code = CRM_STATUS_CODES[lead?.status ?? knownStatus ?? ''];
+      if (code) return { success: true, order: { ...order, status: code, status_updated_at: lead ? lead.updatedAt : knownAt } };
     }
     return { success: true, order };
   } catch (err) {

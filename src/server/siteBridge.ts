@@ -423,13 +423,3 @@ export async function fetchLeadStatuses(ids: string[], opts: { fetch?: Fetch } =
   }));
   return result;
 }
-
-// Requests handed over to paketshop.uz are worked on in the site CRM: adds the status the managers set there
-// (crm_status, crm_lost_reason, crm_updated_at) to the assistant's own request rows. Rows stay as they are when unknown.
-export async function withCrmStatus<T extends { site_lead_id?: unknown }>(orders: T[], opts: { fetch?: Fetch } = {}): Promise<T[]> {
-  const crm = await fetchLeadStatuses(orders.map(order => String(order.site_lead_id ?? '')).filter(Boolean), opts);
-  return orders.map(order => {
-    const lead = order.site_lead_id ? crm.get(String(order.site_lead_id)) : undefined;
-    return lead ? { ...order, crm_status: lead.status, crm_lost_reason: lead.lostReason, crm_updated_at: lead.updatedAt } : order;
-  });
-}

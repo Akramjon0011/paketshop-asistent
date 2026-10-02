@@ -8,7 +8,7 @@ export const sql = process.env.DATABASE_URL ? neon(process.env.DATABASE_URL) : n
 export type Sql = NonNullable<typeof sql>;
 
 // Bump when the DDL below changes; cold starts skip all DDL when the stored version matches.
-const SCHEMA_VERSION = '2026-10-02-knowledge-gaps-1';
+const SCHEMA_VERSION = '2026-10-02-crm-status-1';
 
 // All DDL for the schema, run as one transaction (one round trip instead of ~30)
 export function schemaStatements(db: Sql) {
@@ -78,6 +78,11 @@ export function schemaStatements(db: Sql) {
     )`,
     db`ALTER TABLE orders ADD COLUMN IF NOT EXISTS notes TEXT`,
     db`ALTER TABLE orders ADD COLUMN IF NOT EXISTS site_lead_id TEXT`,   // the same request as a lead in the paketshop.uz CRM
+    // The status managers set for that lead in the site CRM, last read by outcomes.ts (NEW, CONTACTED, IN_PROGRESS, WON, LOST)
+    db`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crm_status TEXT`,
+    db`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crm_updated_at TIMESTAMPTZ`,
+    db`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crm_lost_reason TEXT`,
+    db`ALTER TABLE orders ADD COLUMN IF NOT EXISTS crm_checked_at TIMESTAMPTZ`,
 
     // CRM
     db`CREATE TABLE IF NOT EXISTS customers (

@@ -17,9 +17,13 @@ const CRM_STATUS: Record<string, { label: string; tone: string }> = {
 };
 const SITE_ADMIN_URL = 'https://www.paketshop.uz/uz/admin';
 
+type OutcomeStatus = 'NEW' | 'CONTACTED' | 'IN_PROGRESS' | 'WON' | 'LOST';
+
 type Analytics = {
   totals: { total_orders: number; total_revenue: number; unique_customers: number };
-  statusCounts: Array<{ status: string; count: number }>;
+  outcomes: { days: number; total: number; estimate: number; byStatus: Array<{ status: OutcomeStatus; count: number; estimate: number }> };
+  waiting: number[];      // ids of requests still "new" since yesterday or earlier
+  crmFresh: boolean;      // false: the site CRM could not be read, outcomes are the last known ones
   dailyRevenue: Array<{ day: string; revenue: number; orders: number }>;
   topProducts: Array<{ product_id: number; name: string; units_sold: number; revenue: number }>;
   today: { today_revenue: number; today_orders: number; week_orders: number };
@@ -49,26 +53,26 @@ function StatCard({ icon, label, value, sub, color }: {
   );
 }
 
-function StatusRow({ status, count }: { status: string; count: number }) {
-  const map: Record<string, { label: string; color: string }> = {
-    pending: { label: 'Kutilmoqda', color: 'bg-blue-500' },
-    processing: { label: "Jo'natilmoqda", color: 'bg-amber-500' },
-    delivered: { label: 'Yetkazildi', color: 'bg-green-500' },
-    cancelled: { label: 'Bekor qilindi', color: 'bg-red-500' },
-  };
-  const info = map[status] || { label: status, color: 'bg-gray-500' };
+// One outcome of the requests (site CRM status) with its share of all requests and their estimated value
+function OutcomeRow({ status, count, estimate, total }: { status: OutcomeStatus; count: number; estimate: number; total: number }) {
+  const info = CRM_STATUS[status];
   return (
-    <div className="flex items-center gap-3">
-      <span className={`w-3 h-3 rounded-full ${info.color}`} />
-      <span className="font-bold text-gray-800 flex-1">{info.label}</span>
-      <span className="text-lg font-black text-gray-900">{count}</span>
+    <div className="space-y-1">
+      <div className="flex items-center gap-3">
+        <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full border ${info.tone}`}>{info.label}</span>
+        <span className="flex-1 text-right text-xs text-gray-500">{estimate > 0 ? `${Number(estimate).toLocaleString()} so'm` : ''}</span>
+        <span className="w-8 text-right text-lg font-black text-gray-900">{count}</span>
+      </div>
+      <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+        <div className="h-full bg-amber-400 rounded-full" style={{ width: `${total ? Math.round((count / total) * 100) : 0}%` }} />
+      </div>
     </div>
   );
 }
 
 function DailyRevenueChart({ data }: { data: Array<{ day: string; revenue: number; orders: number }> }) {
   if (data.length === 0) {
-    return <p className="text-gray-400 text-sm text-center py-8">Hozircha sotuvlar bo'lmagan.</p>;
+    return <p className="text-gray-400 text-sm text-center py-8">Hozircha so'rovlar bo'lmagan.</p>;
   }
   const max = Math.max(...data.map(d => Number(d.revenue))) || 1;
   const width = 800;
@@ -84,7 +88,7 @@ function DailyRevenueChart({ data }: { data: Array<{ day: string; revenue: numbe
           return (
             <g key={d.day}>
               <rect x={x} y={y} width={barW} height={h} rx={3} className="fill-amber-400 hover:fill-amber-500" />
-              <title>{`${d.day}: ${Number(d.revenue).toLocaleString()} so'm (${d.orders} buyurtma)`}</title>
+              <title>{`${d.day}: ${Number(d.revenue).toLocaleString()} so'm (${d.orders} ta so'rov)`}</title>
               {i === data.length - 1 || i === 0 || i === Math.floor(data.length / 2) ? (
                 <text x={x + barW / 2} y={height + 30} textAnchor="middle" className="text-[10px] fill-gray-500">
                   {new Date(d.day).toLocaleDateString('uz-UZ', { month: 'short', day: 'numeric' })}
@@ -626,9 +630,15 @@ export default function Admin() {
               <>
                 {/* Top Summary Cards */}
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                  <StatCard icon={<DollarSign />} label="Bugungi daromad" value={`${Number(analytics.today.today_revenue).toLocaleString()} so'm`} color="amber" />
-                  <StatCard icon={<ShoppingBag />} label="Bugungi buyurtmalar" value={String(analytics.today.today_orders)} color="blue" />
-                  <StatCard icon={<TrendingUp />} label="Haftalik buyurtmalar" value={String(analytics.today.week_orders)} color="green" />
+                  <StatCard icon={<ShoppingBag />} label="Bugungi so'rovlar" value={String(analytics.today.today_orders)} sub={`${Number(analytics.today.today_revenue).toLocaleString()} so'm (taxminiy)`} color="blue" />
+                  <StatCard icon={<TrendingUp />} label="Haftalik so'rovlar" value={String(analytics.today.week_orders)} color="green" />
+                  <StatCard
+                    icon={<DollarSign />}
+                    label={`Yutildi · ${analytics.outcomes.days} kun`}
+                    value={String(analytics.outcomes.byStatus.find(o => o.status === 'WON')?.count ?? 0)}
+                    sub={`${Number(analytics.outcomes.byStatus.find(o => o.status === 'WON')?.estimate ?? 0).toLocaleString()} so'm`}
+                    color="amber"
+                  />
                   <StatCard icon={<Users />} label="Konversiya" value={`${analytics.conversion.rate}%`} sub={`${analytics.conversion.buyingCustomers} / ${analytics.conversion.chatUsers}`} color="purple" />
                 </div>
 
@@ -637,15 +647,15 @@ export default function Admin() {
                   <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-4">Umumiy ko'rsatkichlar</h3>
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                     <div>
-                      <p className="text-xs text-gray-500 font-bold uppercase">Jami buyurtmalar</p>
+                      <p className="text-xs text-gray-500 font-bold uppercase">Jami so'rovlar</p>
                       <p className="text-3xl font-black text-gray-900 mt-1">{analytics.totals.total_orders}</p>
                     </div>
                     <div>
-                      <p className="text-xs text-gray-500 font-bold uppercase">Jami daromad</p>
+                      <p className="text-xs text-gray-500 font-bold uppercase">So'rovlar summasi (taxminiy)</p>
                       <p className="text-3xl font-black text-amber-600 mt-1">{Number(analytics.totals.total_revenue).toLocaleString()} so'm</p>
                     </div>
                     <div>
-                      <p className="text-xs text-gray-500 font-bold uppercase">Faol mijozlar</p>
+                      <p className="text-xs text-gray-500 font-bold uppercase">Mijozlar</p>
                       <p className="text-3xl font-black text-gray-900 mt-1">{analytics.totals.unique_customers}</p>
                     </div>
                   </div>
@@ -653,14 +663,14 @@ export default function Admin() {
 
                 {/* Daily Revenue Chart */}
                 <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
-                  <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-4">So'nggi 30 kun daromadi</h3>
+                  <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-4">So'nggi 30 kun: so'rovlar summasi (taxminiy)</h3>
                   <DailyRevenueChart data={analytics.dailyRevenue} />
                 </div>
 
                 {/* Top Products + Status Breakdown */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                   <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
-                    <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-4">Eng ko'p sotilgan mahsulotlar</h3>
+                    <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-4">Eng ko'p so'ralgan mahsulotlar</h3>
                     {analytics.topProducts.length === 0 ? (
                       <p className="text-gray-400 text-sm">Hozircha ma'lumot yo'q</p>
                     ) : (
@@ -674,7 +684,7 @@ export default function Admin() {
                             </div>
                             <div className="flex-1 min-w-0">
                               <p className="font-bold text-gray-900 truncate">{p.name}</p>
-                              <p className="text-xs text-gray-500">{p.units_sold} ta sotildi</p>
+                              <p className="text-xs text-gray-500">{p.units_sold} qadoq so'raldi</p>
                             </div>
                             <span className="font-extrabold text-amber-600 text-sm">{Number(p.revenue).toLocaleString()} so'm</span>
                           </div>
@@ -684,15 +694,24 @@ export default function Admin() {
                   </div>
 
                   <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
-                    <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-4">Buyurtma holatlari</h3>
-                    {analytics.statusCounts.length === 0 ? (
-                      <p className="text-gray-400 text-sm">Hozircha buyurtmalar yo'q</p>
+                    <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-1">So'rovlar natijasi · {analytics.outcomes.days} kun</h3>
+                    <p className="text-xs text-gray-400 mb-4">Holatlar sayt CRM'idan («Leadlar»): menejerlar u yerda o'zgartiradi.</p>
+                    {analytics.waiting.length > 0 && (
+                      <div className="mb-4 text-xs font-semibold text-red-700 bg-red-50 border border-red-100 rounded-xl px-3 py-2">
+                        Javob kutayotgan: {analytics.waiting.length} ta so'rov kecha yoki undan oldin kelgan, hali «Yangi» ({analytics.waiting.map(id => `#${id}`).join(', ')})
+                      </div>
+                    )}
+                    {analytics.outcomes.total === 0 ? (
+                      <p className="text-gray-400 text-sm">Bu davrda so'rovlar yo'q</p>
                     ) : (
                       <div className="space-y-3">
-                        {analytics.statusCounts.map((s) => (
-                          <StatusRow key={s.status} status={s.status} count={s.count} />
+                        {analytics.outcomes.byStatus.map((o) => (
+                          <OutcomeRow key={o.status} status={o.status} count={o.count} estimate={o.estimate} total={analytics.outcomes.total} />
                         ))}
                       </div>
+                    )}
+                    {!analytics.crmFresh && (
+                      <p className="mt-4 text-xs text-amber-700">Sayt CRM'iga hozir ulanib bo'lmadi: oxirgi ma'lum holatlar ko'rsatilmoqda.</p>
                     )}
                   </div>
                 </div>

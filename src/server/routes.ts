@@ -8,7 +8,8 @@ import { catalogTiles } from './catalog.js';
 import { gapGroups, maybeSendWeeklyDigest, resolveGap } from './gaps.js';
 import { examSummary, runExam, saveExam } from './exam.js';
 import { sendToAdmins } from './notify.js';
-import { bridgeEnabled, checkSiteBridge, hasSiteKey, inspectSiteProduct, rateLimitKey, withCrmStatus } from './siteBridge.js';
+import { bridgeEnabled, checkSiteBridge, hasSiteKey, inspectSiteProduct, rateLimitKey } from './siteBridge.js';
+import { maybeSendLeadReminder, outcomeSummary, refreshCrmStatuses, waitingRequests } from './outcomes.js';
 import { timingSafeEqual } from 'crypto';
 import { GoogleGenAI } from "@google/genai";
 import { createRequire } from 'module';
@@ -59,6 +60,15 @@ router.get("/cron/sync-catalog", async (req, res) => {
   if (!sql) return res.status(500).json({ error: "Database not connected" });
   await initDb();
   const sync = await runScheduledSync(sql, { embed: generateEmbeddingsBatch });
+  // What the managers did with the requests (site CRM), then a reminder about requests nobody has taken up yet
+  let crm: { handedOver: number; read: number } | null = null;
+  let reminder = 0;
+  try {
+    crm = await refreshCrmStatuses(sql);
+    reminder = await maybeSendLeadReminder(sql, text => sendToAdmins(text, true));
+  } catch (crmErr) {
+    console.error("CRM status refresh / reminder failed:", crmErr);
+  }
   // Once a week the same run sends the managers a short report (conversations, requests, unanswered questions)
   // together with the quality exam (typical customer questions put to the live assistant and checked)
   let weeklyReport = false;
@@ -72,7 +82,7 @@ router.get("/cron/sync-catalog", async (req, res) => {
   } catch (digestErr) {
     console.error("Weekly report failed:", digestErr);
   }
-  res.json({ ...sync, weeklyReport });
+  res.json({ ...sync, crm, reminder, weeklyReport });
 });
 
 // Public: GET single product details by id
@@ -728,13 +738,21 @@ router.get("/admin/customers/:id/orders", requireAdmin, async (req, res) => {
 router.get("/admin/analytics", requireAdmin, async (_req, res) => {
   if (!sql) return res.status(500).json({ error: "Database not connected" });
   try {
+    await initDb();
+    // Outcomes come from the site CRM for handed-over requests: refresh them first (last known ones if the site is down)
+    const crm = await refreshCrmStatuses(sql).catch(err => {
+      console.warn("CRM status refresh failed:", String(err));
+      return null;
+    });
+    // Requests are estimates, not sales: lost ones (CRM "Yo'qotildi" or cancelled here) are left out of the sums
     const [
       totals,
-      statusCounts,
       dailyRevenue,
       topProducts,
       todaySnapshot,
       conversionData,
+      outcomes,
+      waiting,
     ] = await Promise.all([
       sql`
         SELECT
@@ -742,12 +760,7 @@ router.get("/admin/analytics", requireAdmin, async (_req, res) => {
           COALESCE(SUM(total_price), 0)::numeric AS total_revenue,
           COUNT(DISTINCT customer_phone)::integer AS unique_customers
         FROM orders
-        WHERE status != 'cancelled'
-      `,
-      sql`
-        SELECT status, COUNT(*)::integer AS count
-        FROM orders
-        GROUP BY status
+        WHERE status != 'cancelled' AND crm_status IS DISTINCT FROM 'LOST'
       `,
       sql`
         SELECT
@@ -755,7 +768,7 @@ router.get("/admin/analytics", requireAdmin, async (_req, res) => {
           COALESCE(SUM(total_price), 0)::numeric AS revenue,
           COUNT(*)::integer AS orders
         FROM orders
-        WHERE created_at >= NOW() - INTERVAL '30 days' AND status != 'cancelled'
+        WHERE created_at >= NOW() - INTERVAL '30 days' AND status != 'cancelled' AND crm_status IS DISTINCT FROM 'LOST'
         GROUP BY DATE(created_at)
         ORDER BY day ASC
       `,
@@ -767,24 +780,26 @@ router.get("/admin/analytics", requireAdmin, async (_req, res) => {
           SUM(COALESCE((item->>'packs')::integer, (item->>'quantity')::integer, 0))::integer AS units_sold,
           SUM(COALESCE((item->>'line_total')::numeric, (item->>'quantity')::integer * (item->>'price')::numeric, 0))::numeric AS revenue
         FROM orders, jsonb_array_elements(items) AS item
-        WHERE status != 'cancelled'
+        WHERE status != 'cancelled' AND crm_status IS DISTINCT FROM 'LOST'
         GROUP BY product_id, name
         ORDER BY units_sold DESC
         LIMIT 5
       `,
       sql`
         SELECT
-          COALESCE(SUM(total_price) FILTER (WHERE DATE(created_at) = CURRENT_DATE AND status != 'cancelled'), 0)::numeric AS today_revenue,
+          COALESCE(SUM(total_price) FILTER (WHERE DATE(created_at) = CURRENT_DATE AND status != 'cancelled' AND crm_status IS DISTINCT FROM 'LOST'), 0)::numeric AS today_revenue,
           COUNT(*) FILTER (WHERE DATE(created_at) = CURRENT_DATE)::integer AS today_orders,
-          COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days' AND status != 'cancelled')::integer AS week_orders
+          COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days' AND status != 'cancelled' AND crm_status IS DISTINCT FROM 'LOST')::integer AS week_orders
         FROM orders
       `,
       sql`
         SELECT
           COUNT(DISTINCT COALESCE(telegram_id::text, web_session_id))::integer AS chat_users,
-          (SELECT COUNT(DISTINCT customer_phone)::integer FROM orders WHERE status != 'cancelled') AS buying_customers
+          (SELECT COUNT(DISTINCT customer_phone)::integer FROM orders WHERE status != 'cancelled' AND crm_status IS DISTINCT FROM 'LOST') AS buying_customers
         FROM conversation_history
       `,
+      outcomeSummary(sql, 30),
+      waitingRequests(sql),
     ]);
 
     const conv = conversionData[0] as any;
@@ -794,11 +809,14 @@ router.get("/admin/analytics", requireAdmin, async (_req, res) => {
 
     res.json({
       totals: totals[0],
-      statusCounts,
       dailyRevenue,
       topProducts,
       today: todaySnapshot[0],
       conversion: { chatUsers: conv?.chat_users || 0, buyingCustomers: conv?.buying_customers || 0, rate: conversionRate },
+      outcomes,
+      waiting: waiting.map(r => r.id),
+      // false when handed-over requests exist but the site CRM could not be read: outcomes are the last known ones
+      crmFresh: crm !== null && (crm.handedOver === 0 || crm.read > 0),
     });
   } catch (err) {
     console.error("Analytics error:", err);
@@ -810,8 +828,11 @@ router.get("/admin/analytics", requireAdmin, async (_req, res) => {
 router.get("/admin/orders", requireAdmin, async (req, res) => {
   if (!sql) return res.status(500).json({ error: "Database not connected" });
   try {
+    await initDb();
+    // Requests handed over to paketshop.uz are worked on in the site CRM: bring their stored status up to date first
+    await refreshCrmStatuses(sql).catch(err => console.warn("CRM status refresh failed:", String(err)));
     const data = await sql`SELECT * FROM orders ORDER BY created_at DESC`;
-    res.json(await withCrmStatus(data as Array<{ site_lead_id?: unknown }>));
+    res.json(data);
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

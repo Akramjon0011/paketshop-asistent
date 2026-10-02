@@ -4,6 +4,7 @@
 //  - info:    the model ended its answer with [BILMADIM: topic] (the tag is removed before anyone sees the answer).
 
 import type { Sql } from './db.js';
+import { outcomeLine, outcomeSummary } from './outcomes.js';
 
 export type GapKind = 'product' | 'info';
 export type Gap = { kind: GapKind; topic: string };
@@ -109,15 +110,19 @@ export function formatGapList(groups: GapGroup[], max = 10): string[] {
 }
 
 export async function weeklyDigestText(db: Sql): Promise<string> {
-  const [groups, stats] = await Promise.all([
+  const [groups, stats, outcomes] = await Promise.all([
     gapGroups(db, { days: 7, limit: 10 }),
     db`SELECT
          (SELECT COUNT(DISTINCT COALESCE(telegram_id::text, web_session_id))::int FROM conversation_history
            WHERE created_at > now() - interval '7 days') AS chats,
          (SELECT COUNT(*)::int FROM orders WHERE created_at > now() - interval '7 days') AS requests`,
+    outcomeSummary(db, 7),
   ]);
   const s: any = stats[0] ?? {};
-  const lines = ['📊 Haftalik hisobot (oxirgi 7 kun)', `Suhbatlar: ${Number(s.chats) || 0} · So'rovlar: ${Number(s.requests) || 0}`, ''];
+  const lines = ['📊 Haftalik hisobot (oxirgi 7 kun)', `Suhbatlar: ${Number(s.chats) || 0} · So'rovlar: ${Number(s.requests) || 0}`];
+  // What the managers did with this week's requests (site CRM statuses, refreshed by the cron just before)
+  if (outcomes.total) lines.push(`Natija: ${outcomeLine(outcomes)}`);
+  lines.push('');
   if (!groups.length) {
     lines.push("Javobsiz savollar yo'q: yordamchi hamma savolga javob topdi. 👍");
   } else {
