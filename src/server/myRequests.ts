@@ -128,3 +128,69 @@ export function formatMyRequests(list: MyRequest[], lang: Lang, assistant = { uz
     : `Savol bo'lsa, shu yerga yozing yoki ${SHOP.telegram}, tel. ${SHOP.phone}.`;
   return [head, '', blocks.join('\n\n'), '', foot].join('\n').slice(0, 4000);
 }
+
+// ---------- ordering the same again ----------
+
+export type RepeatItem = {
+  product_id: number;
+  variant_sku: string | null;
+  packs: number;
+  unit: string;
+  name: string;
+  line_total: number | null;   // what it came to then
+  available: boolean;          // still in the catalogue
+};
+export type RepeatRequest = { id: number; total: number; items: RepeatItem[] };
+
+// One of the customer's own requests, to order the same again; null when it is not theirs or has nothing to repeat
+export async function repeatableRequest(
+  db: Sql,
+  id: number,
+  who: { telegramId?: number | null; webSessionId?: string | null },
+): Promise<RepeatRequest | null> {
+  const tg = who.telegramId ?? null;
+  const web = who.webSessionId ?? null;
+  if (!Number.isSafeInteger(id) || id < 1 || (!tg && !web)) return null;
+  const rows = await db`
+    SELECT id, items, total_price FROM orders
+    WHERE id = ${id}
+      AND ((${tg}::bigint IS NOT NULL AND telegram_id = ${tg}::bigint) OR (${web}::text IS NOT NULL AND web_session_id = ${web}::text))`;
+  if (!rows[0]) return null;
+  const lines = (Array.isArray(rows[0].items) ? rows[0].items : [])
+    .filter((line: any) => Number.isInteger(Number(line?.product_id)) && Number(line?.packs) > 0);
+  if (!lines.length) return null;
+
+  // A line's sku differs from the product's own sku when a variant was chosen
+  const ids = [...new Set(lines.map((line: any) => Number(line.product_id)))];
+  const products = await db`SELECT id, sku FROM products
+                            WHERE active AND id IN (SELECT jsonb_array_elements_text(${JSON.stringify(ids)}::jsonb)::int)`;
+  const ownSku = new Map<number, string | null>(products.map((p: any) => [Number(p.id), p.sku ? String(p.sku) : null]));
+  return {
+    id: rows[0].id,
+    total: Number(rows[0].total_price) || 0,
+    items: lines.map((line: any) => {
+      const productId = Number(line.product_id);
+      const sku = line.sku ? String(line.sku) : null;
+      const lineTotal = line.line_total === null || line.line_total === undefined ? NaN : Number(line.line_total);
+      return {
+        product_id: productId,
+        variant_sku: ownSku.has(productId) && sku && sku !== ownSku.get(productId) ? sku : null,
+        packs: Number(line.packs),
+        unit: line.unit ? String(line.unit) : 'qadoq',
+        name: String(line.name ?? '').slice(0, 160),
+        line_total: Number.isFinite(lineTotal) && lineTotal > 0 ? lineTotal : null,
+        available: ownSku.has(productId),
+      };
+    }),
+  };
+}
+
+// System-prompt lines for a repeat (internal, in Uzbek like the rest of the prompt). The amounts of then are allowed
+// for the number guard, so the answer may compare them with today's.
+export function repeatHint(r: RepeatRequest): string {
+  const lines = r.items.map(i => `- ${i.name}: product_id ${i.product_id}${i.variant_sku ? `, variant_sku ${i.variant_sku}` : ''}, ${i.packs} ${i.unit}`
+    + `${i.line_total ? `, o'shanda ${formatAmount(i.line_total)} so'm` : ''}${i.available ? '' : " — HOZIR KATALOGDA YO'Q"}`);
+  return `\n\nTAKRORIY SO'ROV: mijoz avvalgi #${r.id} so'rovini takrorlamoqchi${r.total ? ` (o'shanda taxminiy jami ${formatAmount(r.total)} so'm)` : ''}. O'sha so'rovdagi mahsulotlar:\n${lines.join('\n')}\n`
+    + `Katalogdagi mahsulotlarni calculate_quote bilan BUGUNGI narxda hisobla va natijani qisqa ayt; narx o'zgargan bo'lsa (o'shanda va hozir), buni ayt; katalogda yo'q mahsulotni ochiq ayt. `
+    + `So'ng "Shu bilan so'rov yuboraymi yoki miqdorni o'zgartiramizmi?" deb so'ra. Mijoz rozi bo'lsa, saqlangan ma'lumotlari bilan create_request ni chaqir.`;
+}

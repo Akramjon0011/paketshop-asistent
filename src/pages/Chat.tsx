@@ -210,7 +210,7 @@ export default function Chat() {
     }
   };
 
-  const sendMessageText = async (text: string) => {
+  const sendMessageText = async (text: string, extra: { repeatOf?: number } = {}) => {
     if (!text.trim() || isLoading) return;
 
     const userMessage: Message = { id: Date.now().toString(), role: 'user', content: text.trim() };
@@ -230,7 +230,8 @@ export default function Chat() {
           message: userMessage.content,
           history: chatHistory,
           webSessionId: webSessionId,
-          language: lang
+          language: lang,
+          ...(extra.repeatOf ? { repeatOf: extra.repeatOf } : {})
         })
       });
 
@@ -322,6 +323,13 @@ export default function Chat() {
     const tg = telegramApp();
     if (tg?.openTelegramLink && tg.initData) tg.openTelegramLink(MANAGER_URL);
     else window.open(MANAGER_URL, '_blank', 'noopener,noreferrer');
+  };
+
+  // "🔁 Takrorlash" in the request list: Malika prices the same items at today's prices
+  const repeatRequest = (id: number) => {
+    setRequestsOpen(false);
+    if (isLoading || isRecording) return;
+    sendMessageText(t.repeatText(id), { repeatOf: id });
   };
 
   // A tapped product becomes a question to the assistant (it answers with price, pieces, stock and can calculate)
@@ -733,7 +741,7 @@ export default function Chat() {
         onAsk={askAbout}
       />
 
-      <MyRequestsSheet open={requestsOpen} lang={lang} webSessionId={webSessionId} onClose={closeRequests} />
+      <MyRequestsSheet open={requestsOpen} lang={lang} webSessionId={webSessionId} onClose={closeRequests} onRepeat={repeatRequest} />
 
       {/* Input Area */}
       <footer className="bg-white border-t border-gray-200 p-4 shrink-0">

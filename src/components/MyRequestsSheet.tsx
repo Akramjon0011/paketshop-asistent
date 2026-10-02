@@ -27,11 +27,12 @@ const day = (iso: string) => {
   return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`;
 };
 
-export default function MyRequestsSheet({ open, lang, webSessionId, onClose }: {
+export default function MyRequestsSheet({ open, lang, webSessionId, onClose, onRepeat }: {
   open: boolean;
   lang: Lang;
   webSessionId: string;
   onClose: () => void;
+  onRepeat: (id: number) => void;
 }) {
   const t = STRINGS[lang];
   const [items, setItems] = useState<MyRequest[] | null>(null);
@@ -111,6 +112,15 @@ export default function MyRequestsSheet({ open, lang, webSessionId, onClose }: {
                 </span>
                 {r.total > 0 && <span className="text-sm font-bold text-amber-700">{amount(r.total)} {t.sum}</span>}
               </div>
+              {r.items.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => onRepeat(r.id)}
+                  className="mt-3 w-full text-sm font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-xl py-2 transition-colors cursor-pointer"
+                >
+                  {t.repeat}
+                </button>
+              )}
             </div>
           ))}
         </div>

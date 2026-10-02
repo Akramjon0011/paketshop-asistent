@@ -23,7 +23,7 @@ type ConversationItem = {
 };
 
 type Meta = {
-  name?: string; voice?: boolean; image?: boolean; contact?: boolean; askContact?: boolean;
+  name?: string; voice?: boolean; image?: boolean; contact?: boolean; askContact?: boolean; repeat?: number;
   model?: string; fallback?: boolean; ms?: number; tools?: string[]; requests?: number[];
   corrected?: number[]; unverified?: number[]; nudged?: boolean; gaps?: Array<{ kind: string; topic: string }>;
 };
@@ -273,6 +273,7 @@ export default function ConversationsPanel({ token }: { token: string }) {
                       {m.meta?.voice && <span>· 🎤 ovozli xabar</span>}
                       {m.meta?.image && <span>· 🖼 rasm</span>}
                       {m.meta?.contact && <span>· 📱 raqam Telegram tugmasi orqali</span>}
+                      {m.meta?.repeat && <span>· 🔁 #{m.meta.repeat} so'rovni takrorlash</span>}
                     </div>
                   </div>
                 ) : (

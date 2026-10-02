@@ -7,6 +7,7 @@ import { allowNumbersFromText, collectNumbers, findUnverifiedNumbers, formatAmou
 import { channelOf, extractGapTags, gapFromTag, recordGaps, type Gap } from './gaps.js';
 import { fetchLeadStatuses } from './siteBridge.js';
 import { storeCrmStatus } from './outcomes.js';
+import { repeatHint, type RepeatRequest } from './myRequests.js';
 
 const geminiKey = process.env.GEMINI_API_KEY;
 export const ai = new GoogleGenAI({ apiKey: geminiKey as string });
@@ -372,6 +373,7 @@ export type ChatUserContext = {
   voice?: boolean;        // the message was a voice message (the text is its transcript)
   contact?: boolean;      // the message carries the phone number the customer shared with Telegram's button
   tgUserId?: number;      // Mini App: the Telegram account from verified launch data (requests are listed for it, saved details reused)
+  repeat?: RepeatRequest; // the customer asked to order one of their earlier requests again ("🔁 Takrorlash")
   actions?: ChatActions;  // set by handleConversationalChat: buttons the interface should offer under the answer
   exam?: boolean;   // a quality-exam question: nothing is recorded (no history, no unanswered-question entries)
 };
@@ -924,7 +926,8 @@ export async function handleConversationalChat(
     ? `\n\nSUHBATNING AVVALGI QISMI XULOSASI (eslab qoling, lekin to'g'ridan-to'g'ri takrorlamang):\n${summary}`
     : "";
 
-  const fullSystemInstruction = `${buildSystemInstruction()}${clientHints(userContext)}\n\n${ragContext}${catalogContext}${customerContext}${summaryContext}`;
+  const repeatContext = userContext?.repeat ? repeatHint(userContext.repeat) : '';
+  const fullSystemInstruction = `${buildSystemInstruction()}${clientHints(userContext)}${repeatContext}\n\n${ragContext}${catalogContext}${customerContext}${summaryContext}`;
 
   const contents: any[] = [];
   for (const turn of history) {
@@ -953,7 +956,7 @@ export async function handleConversationalChat(
 
   // Amounts in the answer must come from what the model was given; otherwise it gets one chance to fix them.
   const allowedNumbers = new Set<number>();
-  allowNumbersFromText(`${message}\n${history.map(h => h.content).join('\n')}\n${ragContext}\n${catalogContext}\n${customerContext}\n${summaryContext}\n${SHOP.phone.replace(/\s/g, '')}`, allowedNumbers);
+  allowNumbersFromText(`${message}\n${history.map(h => h.content).join('\n')}\n${ragContext}\n${catalogContext}\n${customerContext}\n${summaryContext}\n${repeatContext}\n${SHOP.phone.replace(/\s/g, '')}`, allowedNumbers);
   let corrections = 1;
   let correctionPending = false;
   let streamedAlready = false;   // text already sent to the client through onChunk (the final reply then replaces it)
@@ -969,6 +972,7 @@ export async function handleConversationalChat(
     ...(userContext?.displayName || userContext?.customerName ? { name: String(userContext.displayName || userContext.customerName).slice(0, 80) } : {}),
     ...(userContext?.voice ? { voice: true } : {}),
     ...(userContext?.contact ? { contact: true } : {}),
+    ...(userContext?.repeat ? { repeat: userContext.repeat.id } : {}),
     ...(images?.length ? { image: true } : {}),
   };
   const answerMeta = () => ({

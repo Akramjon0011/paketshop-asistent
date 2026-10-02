@@ -10,7 +10,7 @@ import { Mp3Encoder } from '@breezystack/lamejs';
 import { createHash } from 'crypto';
 import { normalizeUzbekPhone } from './siteBridge.js';
 import { SHOP } from './shopInfo.js';
-import { customerRequests, formatMyRequests } from './myRequests.js';
+import { customerRequests, formatMyRequests, repeatableRequest } from './myRequests.js';
 
 // Helper to wrap raw 24kHz 16-bit Mono PCM in a standard WAV container for Telegram playback
 function pcmToWav(pcmBuffer: Buffer, sampleRate = 24000, numChannels = 1, bitsPerSample = 16): Buffer {
@@ -95,6 +95,9 @@ const BOT_TEXT = {
     openOnSite: "🔗 Saytda ko'rish",
     video: 'Batafsil video: ',
     myRequests: "📋 Mening so'rovlarim",
+    repeatButton: (id: number) => `🔁 #${id} ni takrorlash`,
+    repeatText: (id: number) => `#${id} so'rovimni takrorlamoqchiman`,
+    repeatMissing: "Bu so'rov topilmadi yoki unda takrorlanadigan mahsulot yo'q.",
     shareContact: '📱 Raqamimni yuborish',
     contactPlaceholder: 'Yoki raqamni yozing',
     leaveRequest: "✅ So'rov qoldirish",
@@ -117,6 +120,9 @@ const BOT_TEXT = {
     openOnSite: '🔗 Открыть на сайте',
     video: 'Видео: ',
     myRequests: '📋 Мои заявки',
+    repeatButton: (id: number) => `🔁 Повторить #${id}`,
+    repeatText: (id: number) => `Хочу повторить заявку #${id}`,
+    repeatMissing: 'Заявка не найдена или в ней нет товаров для повтора.',
     shareContact: '📱 Отправить мой номер',
     contactPlaceholder: 'Или напишите номер',
     leaveRequest: '✅ Оставить заявку',
@@ -323,7 +329,11 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
       if (!sql) throw new Error('Database not connected');
       await initDb();
       const list = await customerRequests(sql, { telegramId: ctx.from.id });
-      await ctx.reply(formatMyRequests(list, lang, { uz: BRAND.assistantName, ru: BRAND.assistantNameRu }));
+      // "🔁 Repeat" under the most recent requests (Telegram keeps a keyboard short)
+      const repeatRows = list.filter(r => r.items.length).slice(0, 5)
+        .map(r => [{ text: BOT_TEXT[lang].repeatButton(r.id), callback_data: `repeat:${r.id}` }]);
+      await ctx.reply(formatMyRequests(list, lang, { uz: BRAND.assistantName, ru: BRAND.assistantNameRu }),
+        repeatRows.length ? { reply_markup: { inline_keyboard: repeatRows } } : {});
     } catch (err) {
       console.error("My requests failed:", err);
       await ctx.reply(BOT_TEXT[lang].error);
@@ -333,6 +343,29 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
   bot.action('myreq', async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     await showMyRequests(ctx);
+  });
+
+  // "🔁 Repeat": Malika prices the same items at today's prices and offers to send the request again
+  bot.action(/^repeat:(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    const message: any = ctx.callbackQuery.message;
+    if (!ctx.from || !message || message.chat?.type !== 'private') return;
+    const lang = langOf(ctx.from.language_code);
+    const id = Number((ctx as any).match?.[1]);
+    let repeat = null;
+    try {
+      if (sql) {
+        await initDb();
+        repeat = await repeatableRequest(sql, id, { telegramId: ctx.from.id });
+      }
+    } catch (err) {
+      console.error("Repeat lookup failed:", err);
+    }
+    if (!repeat) {
+      await ctx.reply(BOT_TEXT[lang].repeatMissing);
+      return;
+    }
+    await processMessage(ctx, { from: ctx.from, chat: message.chat, text: BOT_TEXT[lang].repeatText(id), repeat }, false);
   });
 
   const getWebAppButton = (text: string, url: string) => {
@@ -456,7 +489,7 @@ Bilimlar bazasi: ${res.knowledge} bo'lim${res.knowledgeUpdated ? ' (yangilandi)'
       const from = messageObj.from;
       const displayName = [[from.first_name, from.last_name].filter(Boolean).join(' '), from.username ? `@${from.username}` : '']
         .filter(Boolean).join(' ').trim();
-      const chatContext: ChatUserContext = { telegramId: userId, displayName: displayName || undefined, voice: isVoice, contact: !!messageObj.sharedContact };
+      const chatContext: ChatUserContext = { telegramId: userId, displayName: displayName || undefined, voice: isVoice, contact: !!messageObj.sharedContact, repeat: messageObj.repeat };
       const responseText = await handleConversationalChat(queryText, [], chatContext, undefined, images);
 
       let finalResponseText = responseText;

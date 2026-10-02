@@ -11,7 +11,7 @@ import { sendToAdmins } from './notify.js';
 import { bridgeEnabled, checkSiteBridge, hasSiteKey, inspectSiteProduct, rateLimitKey } from './siteBridge.js';
 import { maybeSendLeadReminder, outcomeSummary, refreshCrmStatuses, waitingRequests } from './outcomes.js';
 import { conversationDetail, listConversations } from './conversations.js';
-import { customerRequests } from './myRequests.js';
+import { customerRequests, repeatableRequest } from './myRequests.js';
 import { verifyInitData } from './telegramAuth.js';
 import { timingSafeEqual } from 'crypto';
 import { GoogleGenAI } from "@google/genai";
@@ -484,10 +484,21 @@ router.post("/chat", aiLimiter, async (req, res) => {
 
 // 1.2. Streaming chat (SSE) — text appears progressively
 router.post("/chat/stream", aiLimiter, async (req, res) => {
-  const { message, history, webSessionId, language } = req.body;
+  const { message, history, webSessionId, language, repeatOf } = req.body;
   if (!message) {
     res.status(400).json({ error: "Xabar majburiy" });
     return;
+  }
+  // "🔁 Takrorlash" from the Mini App's request list: only a request of this session or its Telegram account
+  const tgUserId = miniAppUser(req);
+  let repeat;
+  if (Number.isSafeInteger(repeatOf) && sql) {
+    try {
+      await initDb();
+      repeat = (await repeatableRequest(sql, repeatOf, { webSessionId: typeof webSessionId === 'string' ? webSessionId : null, telegramId: tgUserId ?? null })) ?? undefined;
+    } catch (err) {
+      console.warn("Repeat lookup failed:", err);
+    }
   }
 
   res.setHeader('Content-Type', 'text/event-stream');
@@ -502,7 +513,7 @@ router.post("/chat/stream", aiLimiter, async (req, res) => {
   };
 
   try {
-    const context: ChatUserContext = { webSessionId, language: languageOf(language), tgUserId: miniAppUser(req) };
+    const context: ChatUserContext = { webSessionId, language: languageOf(language), tgUserId, repeat };
     const fullText = await handleConversationalChatStream(
       message,
       history || [],
