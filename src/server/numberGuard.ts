@@ -27,10 +27,14 @@ export function allowNumbersFromText(text: string, into: Set<number>): void {
   amountsIn(text).forEach(n => into.add(n));
 }
 
-// Numbers >= 1000 in the answer that were not provided anywhere. Years (1900–2100) are ignored.
+// Uzbek phone numbers ("+998 99 644 84 44", "+998 (90) 123-45-67", "+998901234567") are contacts, not amounts:
+// read as amounts, "99 644" would look like an unverified 99 644.
+const PHONE = /\+?998[\s-]?\(?\d{2}\)?[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}(?!\d)/g;
+
+// Numbers >= 1000 in the answer that were not provided anywhere. Years (1900–2100) and phone numbers are ignored.
 export function findUnverifiedNumbers(answer: string, allowed: Set<number>): number[] {
   const bad = new Set<number>();
-  for (const n of amountsIn(answer)) {
+  for (const n of amountsIn(answer.replace(PHONE, ' '))) {
     if (n < MIN_CHECKED || (n >= 1900 && n <= 2100)) continue;
     if (!allowed.has(n)) bad.add(n);
   }
