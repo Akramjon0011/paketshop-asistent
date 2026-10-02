@@ -510,7 +510,9 @@ export async function planCatalogSync(db: Sql, site?: SiteData): Promise<SyncPla
     if (p.name !== old.name) changes.push('nomi');
     if (!old.active) changes.push('qayta faollashadi');
     const hashDiffers = old.sync_hash !== fingerprint(p);
-    if (hashDiffers) productsNeedWrite = true;
+    // A visible difference counts even when the hash matches: a stored row changed outside the sync (e.g. an old admin
+    // edit) keeps its hash, and must still be put back to what the site says
+    if (hashDiffers || changes.length) productsNeedWrite = true;
     if (changes.length) changed.push({ sku: p.sku!, name: p.name, changes });
     else if (hashDiffers && old.sync_hash) contentChanged++;   // a missing hash (rows synced before hashes existed) is not a change
     else unchanged++;
